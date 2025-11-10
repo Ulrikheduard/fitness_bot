@@ -1,0 +1,80 @@
+import asyncio
+from datetime import datetime, timedelta
+from config import DAILY_HOUR, DAILY_MINUTE
+from keyboards import action_keyboard
+from database import reset_monthly_day_off, process_weekly_bonuses
+
+# Пример набора цитат
+QUOTES = [
+    "«Если жизнь - это вызов, то я перезвоню» 📞",
+    "«Не знаешь, как поступить, поступи как знаешь» 🔥",
+    "«Пиво,водка, турничок через часик я качок.» 🏃‍♂️",
+    "«Я раньше работал курьером, только я разносил не посылки, а ебальники»",
+    "«Купил фитнес браслет. Теперь знаю, что до пивного ларька 235 шагов»",
+    "«Запомните одну фразу ,быстрые ноги-пизды не получат»",
+    "«Зачем делать просто отжимания, если можно делать берпи»",
+    "«Если мои ноги чувствуют себя хорошо, то я сделаю все чтобы им стало плохо»",
+]
+
+
+async def daily_reminder(bot, chat_id):
+    last_reset_month = 0
+    last_sent_date = None
+    last_weekly_check_day = None
+
+    while True:
+        now = datetime.now()
+        today = now.date()
+
+        # Проверяем, нужно ли сбросить day off (в первый день месяца)
+        current_month_key = now.year * 100 + now.month
+        if now.day == 1 and current_month_key != last_reset_month:
+            try:
+                await reset_monthly_day_off()
+                print(
+                    f"✅ Day Off сброшены для всех участников (месяц: {now.month}/{now.year})"
+                )
+                last_reset_month = current_month_key
+            except Exception as e:
+                print(f"Ошибка при сбросе Day Off: {e}")
+
+        # Проверяем недельные бонусы в воскресенье (день недели 6)
+        # Проверяем один раз в день в воскресенье после 10:00
+        if (
+            now.weekday() == 6
+            and (now.hour > 10 or (now.hour == 10 and now.minute >= 0))
+            and last_weekly_check_day != today
+        ):
+            try:
+                awarded_count = await process_weekly_bonuses(bot, chat_id)
+                if awarded_count > 0:
+                    print(
+                        f"✅ Начислены недельные бонусы: {awarded_count} участникам получили +5 очков"
+                    )
+                last_weekly_check_day = today
+            except Exception as e:
+                print(f"Ошибка при обработке недельных бонусов: {e}")
+
+        # Напоминание в установленное время
+        target = now.replace(
+            hour=DAILY_HOUR, minute=DAILY_MINUTE, second=0, microsecond=0
+        )
+        if now > target:
+            target += timedelta(days=1)
+
+        sleep_seconds = (target - now).total_seconds()
+        await asyncio.sleep(sleep_seconds)
+
+        # Проверяем, не отправляли ли уже напоминание сегодня
+        current_date = datetime.now().date()
+        if last_sent_date != current_date:
+            quote = QUOTES[datetime.now().day % len(QUOTES)]
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🌞 Доброе утро, мужики!\nЦитата дня:\n{quote}\n\nПора на тренировку 🥊\n\nОтметь выполнение задания и пришли видео с упражнениями!",
+                    reply_markup=action_keyboard(),
+                )
+                last_sent_date = current_date
+            except Exception as e:
+                print("Ошибка при отправке сообщения:", e)
