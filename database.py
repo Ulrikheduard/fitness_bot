@@ -28,6 +28,8 @@ async def init_db():
                 task_date TEXT NOT NULL,
                 status TEXT NOT NULL,
                 video_file_id TEXT,
+                bonus_awarded INTEGER DEFAULT 0,
+                bonus_video_file_id TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, task_date),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
@@ -64,6 +66,24 @@ async def init_db():
                 WHERE day_off_used IS NULL OR is_active IS NULL OR last_reset_month IS NULL
             """
             )
+
+        except Exception as e:
+            print(f"Предупреждение при миграции базы данных: {e}")
+
+        # Миграция: добавляем недостающие колонки к таблице daily_tasks
+        try:
+            # Проверяем наличие колонок в daily_tasks
+            cursor = await db.execute("PRAGMA table_info(daily_tasks)")
+            task_columns = [row[1] for row in await cursor.fetchall()]
+
+            if "bonus_awarded" not in task_columns:
+                await db.execute(
+                    "ALTER TABLE daily_tasks ADD COLUMN bonus_awarded INTEGER DEFAULT 0"
+                )
+            if "bonus_video_file_id" not in task_columns:
+                await db.execute(
+                    "ALTER TABLE daily_tasks ADD COLUMN bonus_video_file_id TEXT"
+                )
 
         except Exception as e:
             print(f"Предупреждение при миграции базы данных: {e}")
@@ -174,8 +194,11 @@ async def mark_task_done(user_id, task_date, video_file_id=None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT OR REPLACE INTO daily_tasks (user_id, task_date, status, video_file_id)
+            INSERT INTO daily_tasks (user_id, task_date, status, video_file_id)
             VALUES (?, ?, 'done', ?)
+            ON CONFLICT(user_id, task_date) DO UPDATE SET
+                status = 'done',
+                video_file_id = excluded.video_file_id
         """,
             (user_id, task_date, video_file_id),
         )
@@ -187,8 +210,13 @@ async def mark_task_dayoff(user_id, task_date):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT OR REPLACE INTO daily_tasks (user_id, task_date, status)
-            VALUES (?, ?, 'dayoff')
+            INSERT INTO daily_tasks (user_id, task_date, status, video_file_id, bonus_awarded, bonus_video_file_id)
+            VALUES (?, ?, 'dayoff', NULL, 0, NULL)
+            ON CONFLICT(user_id, task_date) DO UPDATE SET
+                status = 'dayoff',
+                video_file_id = NULL,
+                bonus_awarded = 0,
+                bonus_video_file_id = NULL
         """,
             (user_id, task_date),
         )
@@ -204,6 +232,33 @@ async def get_task_status(user_id, task_date):
         )
         result = await cursor.fetchone()
         return result[0] if result else None
+
+
+async def is_bonus_awarded(user_id, task_date):
+    """Проверить, получал ли пользователь бонус за день"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT bonus_awarded FROM daily_tasks WHERE user_id = ? AND task_date = ?",
+            (user_id, task_date),
+        )
+        result = await cursor.fetchone()
+        return bool(result and result[0])
+
+
+async def mark_bonus_done(user_id, task_date, video_file_id=None):
+    """Отметить бонусное задание как выполненное"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO daily_tasks (user_id, task_date, status, bonus_awarded, bonus_video_file_id)
+            VALUES (?, ?, 'done', 1, ?)
+            ON CONFLICT(user_id, task_date) DO UPDATE SET
+                bonus_awarded = 1,
+                bonus_video_file_id = excluded.bonus_video_file_id
+        """,
+            (user_id, task_date, video_file_id),
+        )
+        await db.commit()
 
 
 async def deactivate_user(user_id):

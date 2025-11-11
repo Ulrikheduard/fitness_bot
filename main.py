@@ -5,7 +5,9 @@ from database import init_db
 from handlers import router
 from scheduler import daily_reminder
 
-CHAT_ID = -5082612557  # <-- вставь ID вашего чата (через @userinfobot можно узнать)
+# ID чата для ежедневных напоминаний
+CHAT_ID = -1003381403522  # <-- вставь ID вашего чата (через @userinfobot можно узнать)
+
 
 async def main():
     bot = Bot(token=BOT_TOKEN)
@@ -19,6 +21,7 @@ async def main():
     asyncio.create_task(daily_reminder(bot, CHAT_ID))
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
