@@ -483,3 +483,34 @@ async def get_users_count():
         cursor = await db.execute("SELECT COUNT(*) FROM users")
         result = await cursor.fetchone()
         return result[0] if result else 0
+
+
+async def get_users_without_task_today():
+    """Получить список активных пользователей, которые не выполнили основное задание на сегодня"""
+    from datetime import date
+    
+    today = date.today().isoformat()
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT u.user_id, u.name
+            FROM users u
+            WHERE u.is_active = 1
+            AND NOT EXISTS (
+                SELECT 1 FROM daily_tasks dt
+                WHERE dt.user_id = u.user_id
+                AND dt.task_date = ?
+                AND dt.status = 'done'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM daily_tasks dt
+                WHERE dt.user_id = u.user_id
+                AND dt.task_date = ?
+                AND dt.status = 'dayoff'
+            )
+            ORDER BY u.name
+        """,
+            (today, today),
+        )
+        return await cursor.fetchall()

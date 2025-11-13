@@ -1,8 +1,8 @@
 import asyncio
 from datetime import datetime, timedelta
-from config import DAILY_HOUR, DAILY_MINUTE
+from config import DAILY_HOUR, DAILY_MINUTE, EVENING_HOUR, EVENING_MINUTE
 from keyboards import action_keyboard
-from database import reset_monthly_day_off, process_weekly_bonuses
+from database import reset_monthly_day_off, process_weekly_bonuses, get_users_without_task_today
 
 # Пример набора цитат
 QUOTES = [
@@ -72,9 +72,59 @@ async def daily_reminder(bot, chat_id):
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"🌞 Доброе утро, мужики!\n\nЦитата дня:\n{quote}\n\nПора на тренировку 🥊\n\nОтметь выполнение задания и пришли видео с упражнениями!\n\nНажми на команду /task",
+                    text=f"<b>🌞 Доброе утро, мужики!</b>\n\nЦитата дня:\n{quote}\n\nПора на тренировку 🥊\n\nОтметь выполнение задания и пришли видео с упражнениями!\n\nНажми на команду /task",
                     reply_markup=None,
                 )
                 last_sent_date = current_date
             except Exception as e:
                 print("Ошибка при отправке сообщения:", e)
+
+
+async def evening_reminder(bot, chat_id):
+    """Отправляет вечернее напоминание в 22:00 о невыполненных заданиях"""
+    last_sent_evening = None
+
+    while True:
+        now = datetime.now()
+        today = now.date()
+
+        # Вычисляем целевое время вечернего напоминания
+        target = now.replace(
+            hour=EVENING_HOUR, minute=EVENING_MINUTE, second=0, microsecond=0
+        )
+        if now > target:
+            target += timedelta(days=1)
+
+        sleep_seconds = (target - now).total_seconds()
+        await asyncio.sleep(sleep_seconds)
+
+        # Проверяем, не отправляли ли уже вечернее напоминание сегодня
+        current_date = datetime.now().date()
+        if last_sent_evening != current_date:
+            try:
+                # Получаем список участников без выполненного задания
+                users_without_task = await get_users_without_task_today()
+
+                # Если есть участники без выполненного задания, отправляем уведомление
+                if users_without_task:
+                    names_list = "\n".join(
+                        [f"• {name}" for user_id, name in users_without_task]
+                    )
+
+                    message_text = (
+                        f"<b>🚨 ALARM! Вечернее напоминание!</b>\n\n"
+                        f"Сегодня следующие участники ещё не выполнили основное задание:\n\n"
+                        f"{names_list}\n\n"
+                        f"Пацаны, у вас ещё есть время! Упор лежа принимаем, задание выполняем!🏋🏼‍♀️"
+                    )
+
+                    await bot.send_message(chat_id=chat_id, text=message_text)
+                    print(
+                        f"✅ Вечернее напоминание отправлено. Участников без задания: {len(users_without_task)}"
+                    )
+                else:
+                    print("✅ Все участники выполнили основное задание. Вечернее напоминание не отправлено.")
+
+                last_sent_evening = current_date
+            except Exception as e:
+                print(f"Ошибка при отправке вечернего напоминания: {e}")

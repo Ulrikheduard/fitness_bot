@@ -3,7 +3,7 @@ from aiogram import Bot, Dispatcher
 from config import BOT_TOKEN
 from database import init_db
 from handlers import router
-from scheduler import daily_reminder
+from scheduler import daily_reminder, evening_reminder
 
 # ID чата для ежедневных напоминаний
 CHAT_ID = -1003381403522  # <-- вставь ID вашего чата (через @userinfobot можно узнать)
@@ -19,6 +19,7 @@ async def main():
 
     # Запуск рассылки
     asyncio.create_task(daily_reminder(bot, CHAT_ID))
+    asyncio.create_task(evening_reminder(bot, CHAT_ID))
 
     await dp.start_polling(bot)
 
