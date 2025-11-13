@@ -514,3 +514,75 @@ async def get_users_without_task_today():
             (today, today),
         )
         return await cursor.fetchall()
+
+
+async def auto_apply_dayoff_for_incomplete_tasks():
+    """
+    Автоматически применяет day off для участников, которые не выполнили основное задание.
+    Вызывается в полночь (00:01).
+    Если day off закончились, участник выбывает из челленджа.
+    """
+    from datetime import date
+    
+    yesterday = (date.today() - __import__('datetime').timedelta(days=1)).isoformat()
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Получаем всех активных пользователей без выполненного задания вчера
+        cursor = await db.execute(
+            """
+            SELECT u.user_id, u.name, u.day_off_used
+            FROM users u
+            WHERE u.is_active = 1
+            AND NOT EXISTS (
+                SELECT 1 FROM daily_tasks dt
+                WHERE dt.user_id = u.user_id
+                AND dt.task_date = ?
+                AND dt.status = 'done'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM daily_tasks dt
+                WHERE dt.user_id = u.user_id
+                AND dt.task_date = ?
+                AND dt.status = 'dayoff'
+            )
+            ORDER BY u.name
+        """,
+            (yesterday, yesterday),
+        )
+        users_without_task = await cursor.fetchall()
+        
+        result = {
+            "auto_dayoff_applied": [],
+            "eliminated": []
+        }
+        
+        for user_id, name, day_off_used in users_without_task:
+            if day_off_used < 3:
+                # Применяем day off автоматически
+                await db.execute(
+                    "UPDATE users SET day_off_used = day_off_used + 1 WHERE user_id = ?",
+                    (user_id,),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO daily_tasks (user_id, task_date, status)
+                    VALUES (?, ?, 'dayoff')
+                    ON CONFLICT(user_id, task_date) DO UPDATE SET status = 'dayoff'
+                """,
+                    (user_id, yesterday),
+                )
+                result["auto_dayoff_applied"].append({
+                    "user_id": user_id,
+                    "name": name,
+                    "remaining": 3 - (day_off_used + 1)
+                })
+            else:
+                # Day off закончились - выбываем
+                await db.execute(
+                    "UPDATE users SET is_active = 0 WHERE user_id = ?",
+                    (user_id,),
+                )
+                result["eliminated"].append({"user_id": user_id, "name": name})
+        
+        await db.commit()
+        return result

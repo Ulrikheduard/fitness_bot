@@ -9,6 +9,10 @@ DAILY_MINUTE = 30
 EVENING_HOUR = 22
 EVENING_MINUTE = 00
 
+# Время ночной проверки и автоприменения day off (00:01)
+NIGHTLY_HOUR = 0
+NIGHTLY_MINUTE = 1
+
 # ID администратора (можно узнать через @userinfobot)
 # Можно указать несколько ID через запятую: [123456789, 987654321]
 ADMIN_IDS = [211164197]  # Заполни свой ID здесь

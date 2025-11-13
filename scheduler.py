@@ -128,3 +128,72 @@ async def evening_reminder(bot, chat_id):
                 last_sent_evening = current_date
             except Exception as e:
                 print(f"Ошибка при отправке вечернего напоминания: {e}")
+
+
+async def nightly_check(bot, chat_id):
+    """Выполняет проверку в полночь и применяет день отдыха автоматически"""
+    last_check_date = None
+
+    while True:
+        now = datetime.now()
+        today = now.date()
+
+        # Вычисляем целевое время проверки (00:01)
+        target = now.replace(hour=0, minute=1, second=0, microsecond=0)
+        if now > target:
+            target += timedelta(days=1)
+
+        sleep_seconds = (target - now).total_seconds()
+        await asyncio.sleep(sleep_seconds)
+
+        # Проверяем, не проводили ли уже проверку сегодня
+        current_date = datetime.now().date()
+        if last_check_date != current_date:
+            try:
+                from database import auto_apply_dayoff_for_incomplete_tasks
+
+                result = await auto_apply_dayoff_for_incomplete_tasks()
+
+                # Отправляем уведомления если что-то произошло
+                if result["auto_dayoff_applied"]:
+                    names_list = "\n".join(
+                        [
+                            f"• {item['name']} (осталось Day Off: {item['remaining']}/3)"
+                            for item in result["auto_dayoff_applied"]
+                        ]
+                    )
+
+                    message_text = (
+                        f"⚠️ Автоматический Day off\n\n"
+                        f"Cледующим участникам автоматически применён day off "
+                        f"(они не выполнили задание вчера):\n\n"
+                        f"{names_list}\n\n"
+                        f"Сегодня им нужно выполнить задание, чтобы продолжить челлендж!"
+                    )
+
+                    await bot.send_message(chat_id=chat_id, text=message_text)
+                    print(
+                        f"✅ Автоматический day off применён для {len(result['auto_dayoff_applied'])} участников"
+                    )
+
+                if result["eliminated"]:
+                    names_list = "\n".join([f"• {item['name']}" for item in result["eliminated"]])
+
+                    message_text = (
+                        f"❌ Участники выбыли из челленджа\n\n"
+                        f"Использованы все 3 дня отдыха и не выполнено вчерашнее задание:\n\n"
+                        f"{names_list}\n\n"
+                        f"Увидимся в следующем месяце! 👋"
+                    )
+
+                    await bot.send_message(chat_id=chat_id, text=message_text)
+                    print(
+                        f"✅ Из челленджа исключены {len(result['eliminated'])} участников"
+                    )
+
+                if not result["auto_dayoff_applied"] and not result["eliminated"]:
+                    print("✅ Все участники выполнили задание или использовали day off. Проверка завершена.")
+
+                last_check_date = current_date
+            except Exception as e:
+                print(f"Ошибка при выполнении ночной проверки: {e}")
