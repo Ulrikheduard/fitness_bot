@@ -162,7 +162,7 @@ async def handle_video(message: Message):
         await mark_task_done(user_id, today, video_file_id)
         await update_score(user_id, 2)
         response_text = (
-            f"Красавчик, {message.from_user.first_name}! 👏\n"
+            f"Так держать, {message.from_user.first_name}! 👏\n"
             f"Видео получено и задание подтверждено. Лови +2💪 бицепса.\n"
             f"Твой рейтинг: {{score}} бицепсов."
         )
@@ -170,7 +170,7 @@ async def handle_video(message: Message):
         await mark_bonus_done(user_id, today, video_file_id)
         await update_score(user_id, 1)
         response_text = (
-            f"🔥 {message.from_user.first_name}, ты машина! Экстра бонус засчитан! Лови +1💪 бицепс.\n"
+            f"🔥 {message.from_user.first_name}, ты легенда! Экстра бонус засчитан! Лови +1💪 бицепс.\n"
             f"Твой рейтинг: {{score}} бицепсов."
         )
 
@@ -308,6 +308,7 @@ async def show_rating(message: Message):
         f"💤 Использовано Day Off: {user['day_off_used']} из 3\n"
         f"📊 Статистика:\n"
         f"   Выполнено заданий: {stats['done']}\n"
+        f"   Экстра бонусы: {stats['bonus']}\n"
         f"   Использовано Day Off: {stats['dayoff']}\n"
         f"   Всего дней: {stats['total']}\n"
         f"Статус: {status_text}"
@@ -332,6 +333,7 @@ async def show_stats(message: Message):
     await message.answer(
         f"📊 Статистика за текущий месяц:\n\n"
         f"✅ Выполнено заданий: {stats_month['done']}\n"
+        f"🔥 Экстра бонусы: {stats_month['bonus']}\n"
         f"💤 Использовано Day Off: {stats_month['dayoff']}\n"
         f"📈 Всего дней: {stats_month['total']}\n\n"
         f"🏆 Текущий рейтинг: {user['score']} бицепсов\n"
@@ -397,7 +399,9 @@ async def show_leaderboard(message: Message):
         medal = (
             "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"{idx}."
         )
-        leaderboard_text += f"{medal} {status_emoji} {name}: {score} бицепсов (Day Off: {day_off_used}/3)\n"
+        leaderboard_text += (
+            f"{medal} {name}: {score} бицепсов (Day Off: {day_off_used}/3)\n"
+        )
 
     await message.answer(leaderboard_text)
 

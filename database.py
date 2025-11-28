@@ -304,7 +304,8 @@ async def get_user_stats(user_id, month=None, year=None):
                 """
                 SELECT COUNT(*) as total, 
                        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as done_count,
-                       SUM(CASE WHEN status = 'dayoff' THEN 1 ELSE 0 END) as dayoff_count
+                       SUM(CASE WHEN status = 'dayoff' THEN 1 ELSE 0 END) as dayoff_count,
+                       SUM(CASE WHEN bonus_awarded = 1 THEN 1 ELSE 0 END) as bonus_count
                 FROM daily_tasks 
                 WHERE user_id = ? 
                 AND strftime('%Y', task_date) = ? 
@@ -317,7 +318,8 @@ async def get_user_stats(user_id, month=None, year=None):
                 """
                 SELECT COUNT(*) as total, 
                        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as done_count,
-                       SUM(CASE WHEN status = 'dayoff' THEN 1 ELSE 0 END) as dayoff_count
+                       SUM(CASE WHEN status = 'dayoff' THEN 1 ELSE 0 END) as dayoff_count,
+                       SUM(CASE WHEN bonus_awarded = 1 THEN 1 ELSE 0 END) as bonus_count
                 FROM daily_tasks 
                 WHERE user_id = ?
             """,
@@ -329,6 +331,7 @@ async def get_user_stats(user_id, month=None, year=None):
             "total": result[0] or 0,
             "done": result[1] or 0,
             "dayoff": result[2] or 0,
+            "bonus": result[3] or 0,
         }
 
 
