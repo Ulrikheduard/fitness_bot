@@ -391,7 +391,7 @@ async def show_leaderboard(message: Message):
         await message.answer("Пока нет участников в рейтинге.")
         return
 
-    leaderboard_text = "🏆 Таблица лидеров:\n\n"
+    leaderboard_text = "🏆 <b>Таблица лидеров:</b>\n\n"
     for idx, (user_id, name, score, day_off_used, is_active) in enumerate(
         users[:10], 1
     ):
@@ -400,10 +400,10 @@ async def show_leaderboard(message: Message):
             "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"{idx}."
         )
         leaderboard_text += (
-            f"{medal} {name}: {score} бицепсов (Day Off: {day_off_used}/3)\n"
+            f"{medal} {name}: {score} бицепсов\n<i>Day Off: {day_off_used}/3</i>\n"
         )
 
-    await message.answer(leaderboard_text)
+    await message.answer(leaderboard_text, parse_mode="HTML")
 
 
 # --- Административные команды ---

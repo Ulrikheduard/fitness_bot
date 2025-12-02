@@ -411,32 +411,6 @@ async def award_weekly_bonus(user_id, week_start_date):
         return False
 
 
-async def process_weekly_bonuses(bot=None, chat_id=None):
-    """Обработать недельные бонусы для всех активных пользователей"""
-    from datetime import datetime, timedelta
-
-    # Определяем начало прошедшей недели (понедельник)
-    # Проверяем в воскресенье, значит неделя была с понедельника по воскресенье
-    today = datetime.now().date()
-    days_since_monday = today.weekday()  # 0 = понедельник, 6 = воскресенье
-    week_start = today - timedelta(days=days_since_monday)
-    week_start_str = week_start.isoformat()
-
-    # Получаем всех активных пользователей
-    users = await get_all_users()
-
-    awarded_count = 0
-    awarded_users = []
-
-    for user_tuple in users:
-        user_id = user_tuple[0]
-        user_name = user_tuple[1]
-        is_active = user_tuple[4] if len(user_tuple) > 4 else 1
-
-        if is_active:
-            if await award_weekly_bonus(user_id, week_start_str):
-                awarded_count += 1
-                awarded_users.append((user_id, user_name))
 
     # Отправляем уведомления пользователям, если передан bot
     if bot and chat_id and awarded_users:
@@ -491,9 +465,9 @@ async def get_users_count():
 async def get_users_without_task_today():
     """Получить список активных пользователей, которые не выполнили основное задание на сегодня"""
     from datetime import date
-    
+
     today = date.today().isoformat()
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             """
@@ -526,9 +500,9 @@ async def auto_apply_dayoff_for_incomplete_tasks():
     Если day off закончились, участник выбывает из челленджа.
     """
     from datetime import date
-    
-    yesterday = (date.today() - __import__('datetime').timedelta(days=1)).isoformat()
-    
+
+    yesterday = (date.today() - __import__("datetime").timedelta(days=1)).isoformat()
+
     async with aiosqlite.connect(DB_PATH) as db:
         # Получаем всех активных пользователей без выполненного задания вчера
         cursor = await db.execute(
@@ -553,12 +527,9 @@ async def auto_apply_dayoff_for_incomplete_tasks():
             (yesterday, yesterday),
         )
         users_without_task = await cursor.fetchall()
-        
-        result = {
-            "auto_dayoff_applied": [],
-            "eliminated": []
-        }
-        
+
+        result = {"auto_dayoff_applied": [], "eliminated": []}
+
         for user_id, name, day_off_used in users_without_task:
             if day_off_used < 3:
                 # Применяем day off автоматически
@@ -574,11 +545,13 @@ async def auto_apply_dayoff_for_incomplete_tasks():
                 """,
                     (user_id, yesterday),
                 )
-                result["auto_dayoff_applied"].append({
-                    "user_id": user_id,
-                    "name": name,
-                    "remaining": 3 - (day_off_used + 1)
-                })
+                result["auto_dayoff_applied"].append(
+                    {
+                        "user_id": user_id,
+                        "name": name,
+                        "remaining": 3 - (day_off_used + 1),
+                    }
+                )
             else:
                 # Day off закончились - выбываем
                 await db.execute(
@@ -586,6 +559,6 @@ async def auto_apply_dayoff_for_incomplete_tasks():
                     (user_id,),
                 )
                 result["eliminated"].append({"user_id": user_id, "name": name})
-        
+
         await db.commit()
         return result
