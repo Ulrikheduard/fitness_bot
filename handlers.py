@@ -102,9 +102,10 @@ async def cmd_help(message: Message):
 
 
 # --- Обработка видеофайлов ---
-@router.message(F.video | F.document)
-async def handle_video(message: Message):
-    """Обработка видеофайлов от участников"""
+# --- Обработка видеофайлов и фото (для основного задания и еженедельного челленджа) ---
+@router.message(F.video | F.document | F.photo)
+async def handle_all_videos(message: Message):
+    """Обработка видеофайлов и фото от участников (основное задание и еженедельный челлендж)"""
     user_id = message.from_user.id
     user = await get_user(user_id)
 
@@ -116,46 +117,120 @@ async def handle_video(message: Message):
         await message.answer("Ты выбыл из челленджа. Увидимся в следующем месяце!")
         return
 
-    today = date.today().isoformat()
+    # ===== СНАЧАЛА ПРОВЕРЯЕМ ЕЖЕНЕДЕЛЬНЫЙ ЧЕЛЛЕНДЖ =====
+    weekly_prompt_info = weekly_prompts.get(user_id)
+    if weekly_prompt_info:
+        task_type = weekly_prompt_info. get("type")
+        if task_type and task_type in ["pullups", "steps"]:
+            # Получаем file_id видео/фото
+            file_id = None
+            if message.video:
+                file_id = message.video.file_id
+            elif message.photo:
+                file_id = message.photo[-1].file_id
+            elif (
+                message.document
+                and message.document.mime_type
+                and "video" in message. document.mime_type
+            ):
+                file_id = message. document.file_id
+
+            if not file_id:
+                await message.answer("Пожалуйста, пришли видео или фото упражнений.")
+                return
+
+            if not is_week_active():
+                await message.answer("❌ Неделя закончилась! Попробуй на следующей неделе.")
+                await _delete_prompt_message(message.bot, message.chat.id, weekly_prompt_info)
+                weekly_prompts. pop(user_id, None)
+                return
+
+            # Проверяем, не выполнено ли уже это задание
+            if await is_weekly_task_completed(user_id, task_type):
+                task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
+                await message.answer(f"✅ {task_name} уже выполнены на этой неделе!")
+                await _delete_prompt_message(message. bot, message.chat.id, weekly_prompt_info)
+                weekly_prompts.pop(user_id, None)
+                return
+
+            # Отмечаем задание как выполненное
+            await mark_weekly_task_done(user_id, task_type, file_id)
+            await update_score(user_id, 5)
+
+            task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
+            task_emoji = "🏋🏼‍♀️" if task_type == "pullups" else "🚶"
+
+            # Получаем обновленный счет пользователя
+            updated_user = await get_user(user_id)
+            new_score = updated_user["score"]
+
+            response_text = (
+                f"🔥 Отлично, {message. from_user.first_name}! {task_emoji}\n"
+                f"<b>{task_name}</b> выполнены на этой неделе!\n\n"
+                f"Ты получил <b>+5💪 бицепсов</b>\n"
+                f"Твой рейтинг: <b>{new_score}</b> бицепсов.\n\n"
+                f"💡 Напоминаю: каждое из еженедельных заданий можно выполнить только 1 раз в неделю!"
+            )
+
+            # Проверяем статус обоих заданий
+            status = await get_weekly_challenge_status(user_id)
+            if status["pullups_done"] and status["steps_done"]:
+                response_text += "\n\n🏆 СУПЕР! Ты выполнил оба задания на этой неделе!"
+
+            # Удаляем сообщение с просьбой отправить видео
+            await _delete_prompt_message(message.bot, message.chat.id, weekly_prompt_info)
+            weekly_prompts.pop(user_id, None)
+
+            await message.answer(response_text, parse_mode="HTML")
+            return  # Выходим, чтобы не обрабатывать как основное задание
+
+    # ===== ПОТОМ ПРОВЕРЯЕМ ОСНОВНОЕ ЗАДАНИЕ И БОНУС =====
+    today = date.today(). isoformat()
     task_status = await get_task_status(user_id, today)
     prompt_info = video_prompts.get(user_id)
     expected_type = prompt_info.get("type") if prompt_info else None
 
     if not prompt_info:
+        # Проверяем, может ли это быть продолжением отправки видео для основного задания
+        # Если сегодня уже отмечено основное задание как "done", то просто пропускаем
+        if task_status == "done":
+            # Молча пропускаем дополнительные видео после успешного выполнения основного задания
+            return
+        
         await message.answer(
             "Сначала воспользуйся кнопками под заданием, чтобы получить запрос на видео."
         )
         return
 
     if task_status == "dayoff":
-        await message.answer("Сегодня выбран Day Off. Видео не требуется.")
+        await message.answer("Сегодня выбран Day Off.  Видео не требуется.")
         await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
         video_prompts.pop(user_id, None)
         return
 
     if expected_type == "main" and task_status == "done":
-        await message.answer("Основное задание уже отмечено на сегодня! ✅")
+        await message.answer("Основное задание уже отмечено на сегодня!  ✅")
         await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
         video_prompts.pop(user_id, None)
         return
 
     if expected_type == "bonus":
         if task_status != "done":
-            await message.answer(
+            await message. answer(
                 "Сначала выполни основное задание и пришли видео, затем получи бонус."
             )
             await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
             video_prompts.pop(user_id, None)
             return
         if await is_bonus_awarded(user_id, today):
-            await message.answer("Бонус за сегодня уже получен! 🔥")
+            await message.answer("Бонус за сегодня уже получен!  🔥")
             await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
             video_prompts.pop(user_id, None)
             return
 
     if expected_type not in {"main", "bonus"}:
-        await message.answer("Не удалось определить тип задания. Нажми кнопку ещё раз.")
-        await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
+        await message.answer("Не удалось определить тип задания.  Нажми кнопку ещё раз.")
+        await _delete_prompt_message(message. bot, message.chat.id, prompt_info)
         video_prompts.pop(user_id, None)
         return
 
@@ -163,8 +238,10 @@ async def handle_video(message: Message):
     video_file_id = None
     if message.video:
         video_file_id = message.video.file_id
+    elif message.photo:
+        video_file_id = message. photo[-1].file_id
     elif (
-        message.document
+        message. document
         and message.document.mime_type
         and "video" in message.document.mime_type
     ):
@@ -179,22 +256,23 @@ async def handle_video(message: Message):
         await update_score(user_id, 2)
         response_text = (
             f"Так держать, {message.from_user.first_name}! 👏\n"
-            f"Видео получено и задание подтверждено. Лови +2💪 бицепса.\n"
+            f"Видео получено и задание подтверждено.  Лови +2💪 бицепса.\n"
             f"Твой рейтинг: {{score}} бицепсов."
         )
     else:  # bonus
         await mark_bonus_done(user_id, today, video_file_id)
         await update_score(user_id, 1)
         response_text = (
-            f"🔥 {message.from_user.first_name}, ты легенда! Экстра бонус засчитан! Лови +1💪 бицепс.\n"
+            f"🔥 {message.from_user.first_name}, ты легенда!  Экстра бонус засчитан!  Лови +1💪 бицепс.\n"
             f"Твой рейтинг: {{score}} бицепсов."
         )
 
-    await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
+    await _delete_prompt_message(message. bot, message.chat.id, prompt_info)
     video_prompts.pop(user_id, None)
 
     updated_user = await get_user(user_id)
-    await message.answer(response_text.format(score=updated_user["score"]))
+    await message.answer(response_text. format(score=updated_user["score"]))
+
 
 
 # --- Обработка нажатий кнопок ---
@@ -643,87 +721,3 @@ async def weekly_challenge_select(callback: CallbackQuery):
         "message_id": prompt_message.message_id,
     }
     await callback.answer()
-
-
-@router.message(F.content_type. in_(["video", "document", "photo"]))
-async def handle_weekly_video(message: Message):
-    """Обработка видео/фото для еженедельного челленджа"""
-    user_id = message.from_user. id
-    user = await get_user(user_id)
-
-    if not user:
-        await message.answer("Сначала используй команду /start")
-        return
-
-    if not user["is_active"]:
-        await message.answer("Ты выбыл из челленджа. Увидимся в следующем месяце!")
-        return
-
-    prompt_info = weekly_prompts.get(user_id)
-    if not prompt_info:
-        return  # Пропускаем, если это не часть еженедельного челленджа
-
-    task_type = prompt_info. get("type")
-    if not task_type or task_type not in ["pullups", "steps"]:
-        return
-
-    # Получаем file_id видео/фото
-    file_id = None
-    if message.video:
-        file_id = message. video.file_id
-    elif message.photo:
-        file_id = message.photo[-1].file_id
-    elif (
-        message.document
-        and message.document.mime_type
-        and "video" in message.document.mime_type
-    ):
-        file_id = message.document.file_id
-
-    if not file_id:
-        await message.answer("Пожалуйста, пришли видео или фото упражнений.")
-        return
-
-    if not is_week_active():
-        await message.answer("❌ Неделя закончилась! Попробуй на следующей неделе.")
-        await _delete_prompt_message(message. bot, message.chat.id, prompt_info)
-        weekly_prompts.pop(user_id, None)
-        return
-
-    # Проверяем еще раз, не выполнено ли уже это задание
-    if await is_weekly_task_completed(user_id, task_type):
-        task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
-        await message. answer(f"✅ {task_name} уже выполнены на этой неделе!")
-        await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
-        weekly_prompts.pop(user_id, None)
-        return
-
-    # Отмечаем задание как выполненное
-    await mark_weekly_task_done(user_id, task_type, file_id)
-    await update_score(user_id, 5)
-
-    task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
-    task_emoji = "🏋🏼‍♀️" if task_type == "pullups" else "🚶"
-
-    # Получаем обновленный счет пользователя
-    updated_user = await get_user(user_id)
-    new_score = updated_user["score"]
-
-    response_text = (
-        f"🔥 Отлично, {message.from_user.first_name}! {task_emoji}\n"
-        f"<b>{task_name}</b> выполнены на этой неделе!\n\n"
-        f"Ты получил <b>+5💪 бицепсов</b>\n"
-        f"Твой рейтинг: <b>{new_score}</b> бицепсов.\n\n"
-        f"💡 Напоминаю: каждое из еженедельных заданий можно выполнить только 1 раз в неделю!"
-    )
-
-    # Проверяем статус обоих заданий
-    status = await get_weekly_challenge_status(user_id)
-    if status["pullups_done"] and status["steps_done"]:
-        response_text += "\n\n🏆 СУПЕР! Ты выполнил оба задания на этой неделе!"
-
-    # Удаляем сообщение с просьбой отправить видео
-    await _delete_prompt_message(message. bot, message.chat.id, prompt_info)
-    weekly_prompts.pop(user_id, None)
-
-    await message.answer(response_text, parse_mode="HTML")
