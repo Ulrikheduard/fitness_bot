@@ -11,3 +11,14 @@ def action_keyboard():
         ]
     )
     return keyboard
+
+
+def weekly_challenge_keyboard():
+    """Клавиатура для выбора еженедельного задания"""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏋🏼‍♀️ Подтягивания (70x)", callback_data="weekly_pullups")],
+            [InlineKeyboardButton(text="🚶 Шаги (50k)", callback_data="weekly_steps")],
+        ]
+    )
+    return keyboard

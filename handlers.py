@@ -21,8 +21,14 @@ from database import (
     get_users_count,
     is_bonus_awarded,
     mark_bonus_done,
+    get_weekly_challenge_status,
+    mark_weekly_task_done,
+    is_weekly_task_completed,
+    is_week_active,
+    get_current_week_year,
 )
 from keyboards import action_keyboard
+from keyboards import weekly_challenge_keyboard
 
 # Роутер (подключается в main.py)
 router = Router()
@@ -30,6 +36,8 @@ router = Router()
 # Храним активные запросы на отправку видео
 # Формат: {user_id: {"message_id": int, "type": "main"|"bonus"}}
 video_prompts: dict[int, dict[str, object]] = {}
+# Глобальный словарь для отслеживания контекста еженедельного челленджа
+weekly_prompts: dict[int, dict[str, object]] = {}
 
 
 async def _delete_prompt_message(
@@ -76,11 +84,19 @@ async def cmd_help(message: Message):
         "/help — помощь\n"
         "/rating — посмотреть свой рейтинг\n"
         "/stats — посмотреть статистику\n"
-        "/leaderboard — посмотреть таблицу лидеров\n"
-        "/task — получить кнопки для отметки задания\n\n"
-        "Каждый день бот будет присылать напоминание с кнопками в 9:00 утра. "
+        "/task — получить кнопки для отметки задания\n"
+        "/weekly — еженедельный челлендж (70 подтягиваний или 50k шагов за неделю)\n"
+        "/leaderboard — посмотреть таблицу лидеров\n\n"
+        "<b>Основное задание:</b>\n"
+        "Каждый день бот будет присылать напоминание с кнопками в 9:00 утра.  "
         "Нажми 'Выполнил задачу' и пришли видео с упражнениями для получения бицепсов.\n"
-        "После этого можно заработать 🔥 экстра бонус (+1💪), если пришлёшь дополнительное видео.",
+        "После этого можно заработать 🔥 экстра бонус (+1💪), если пришлёшь дополнительное видео.\n\n"
+        "<b>Еженедельный челлендж:</b>\n"
+        "Воспользуйся командой /weekly для участия в еженедельном челленже.  "
+        "Выбери одно или оба задания и пришли подтверждение выполнения.  "
+        "Каждое задание доступно только 1 раз в неделю (до 23:59 в воскресенье).  "
+        "За каждое выполненное задание получи +5 баллов.",
+        parse_mode="HTML",
         reply_markup=action_keyboard(),
     )
 
@@ -534,3 +550,180 @@ async def handle_bonus(callback: CallbackQuery):
     )
     video_prompts[user_id] = {"message_id": prompt_message.message_id, "type": "bonus"}
     await callback.answer("Пришли бонусное видео ✅")
+
+# Обработчики еженедельного челленджа
+@router.message(Command("weekly"))
+async def weekly_challenge_command(message: Message):
+    """Команда для запуска еженедельного челленджа"""
+    user_id = message.from_user. id
+    user = await get_user(user_id)
+
+    if not user:
+        await message.answer("Сначала используй команду /start")
+        return
+
+    if not user["is_active"]:
+        await message.answer("Ты выбыл из челленджа.  Увидимся в следующем месяце!")
+        return
+
+    if not is_week_active():
+        await message.answer(
+            "❌ Неделя закончилась! Еженедельный челлендж доступен только до 23:59 в воскресенье."
+        )
+        return
+
+    await message.answer(
+        "🏅 <b>ЕЖЕНЕДЕЛЬНЫЕ БИЦЕПСЫ</b>\n\n"
+        "Выбери одно или оба задания:\n\n"
+        "<b>🏋🏼‍♀️ Подтягивания</b>: 70 повторений за неделю\n"
+        "<b>🚶 Шаги</b>: 50 000 шагов за неделю\n\n"
+        "За каждое выполненное задание ты получишь <b>+5💪 бицепсов</b>\n"
+        "Каждое задание можно выполнить только <b>1 раз в неделю</b>!\n\n"
+        "Выбери задание:",
+        reply_markup=weekly_challenge_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data. in_(["weekly_pullups", "weekly_steps"]))
+async def weekly_challenge_select(callback: CallbackQuery):
+    """Обработка выбора типа еженедельного задания"""
+    user_id = callback.from_user.id
+    task_type = "pullups" if callback.data == "weekly_pullups" else "steps"
+
+    user = await get_user(user_id)
+    if not user:
+        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+        return
+
+    if not user["is_active"]:
+        await callback.answer("Ты выбыл из челленджа!", show_alert=True)
+        return
+
+    if not is_week_active():
+        await callback.answer(
+            "❌ Неделя закончилась! Попробуй на следующей неделе.", show_alert=True
+        )
+        return
+
+    # Проверяем, выполнено ли уже это задание на этой неделе
+    if await is_weekly_task_completed(user_id, task_type):
+        task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
+        await callback.answer(
+            f"✅ {task_name} уже выполнены на этой неделе!", show_alert=True
+        )
+        return
+
+    # Удаляем старый запрос (если был)
+    previous_prompt = weekly_prompts.pop(user_id, None)
+    await _delete_prompt_message(
+        callback.bot, callback.message.chat.id, previous_prompt
+    )
+
+    # Удаляем сообщение с кнопками
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    task_name = "подтягивания (70x)" if task_type == "pullups" else "шаги (50k)"
+    task_emoji = "🏋🏼‍♀️" if task_type == "pullups" else "🚶"
+
+    # Просим прислать видео/фото
+    prompt_message = await callback.message. answer(
+        f"{task_emoji} Отлично! Ты выбрал: <b>{task_name}</b>\n\n"
+        f"Теперь пришли фото или видео с доказательством выполнения задания.\n"
+        f"Можешь отправить несколько файлов подряд - я подожду 📸",
+        parse_mode="HTML"
+    )
+
+    # Сохраняем контекст для последующей обработки видео
+    weekly_prompts[user_id] = {
+        "type": task_type,
+        "message_id": prompt_message.message_id,
+    }
+    await callback.answer()
+
+
+@router.message(F.content_type. in_(["video", "document", "photo"]))
+async def handle_weekly_video(message: Message):
+    """Обработка видео/фото для еженедельного челленджа"""
+    user_id = message.from_user. id
+    user = await get_user(user_id)
+
+    if not user:
+        await message.answer("Сначала используй команду /start")
+        return
+
+    if not user["is_active"]:
+        await message.answer("Ты выбыл из челленджа. Увидимся в следующем месяце!")
+        return
+
+    prompt_info = weekly_prompts.get(user_id)
+    if not prompt_info:
+        return  # Пропускаем, если это не часть еженедельного челленджа
+
+    task_type = prompt_info. get("type")
+    if not task_type or task_type not in ["pullups", "steps"]:
+        return
+
+    # Получаем file_id видео/фото
+    file_id = None
+    if message.video:
+        file_id = message. video.file_id
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+    elif (
+        message.document
+        and message.document.mime_type
+        and "video" in message.document.mime_type
+    ):
+        file_id = message.document.file_id
+
+    if not file_id:
+        await message.answer("Пожалуйста, пришли видео или фото упражнений.")
+        return
+
+    if not is_week_active():
+        await message.answer("❌ Неделя закончилась! Попробуй на следующей неделе.")
+        await _delete_prompt_message(message. bot, message.chat.id, prompt_info)
+        weekly_prompts.pop(user_id, None)
+        return
+
+    # Проверяем еще раз, не выполнено ли уже это задание
+    if await is_weekly_task_completed(user_id, task_type):
+        task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
+        await message. answer(f"✅ {task_name} уже выполнены на этой неделе!")
+        await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
+        weekly_prompts.pop(user_id, None)
+        return
+
+    # Отмечаем задание как выполненное
+    await mark_weekly_task_done(user_id, task_type, file_id)
+    await update_score(user_id, 5)
+
+    task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
+    task_emoji = "🏋🏼‍♀️" if task_type == "pullups" else "🚶"
+
+    # Получаем обновленный счет пользователя
+    updated_user = await get_user(user_id)
+    new_score = updated_user["score"]
+
+    response_text = (
+        f"🔥 Отлично, {message.from_user.first_name}! {task_emoji}\n"
+        f"<b>{task_name}</b> выполнены на этой неделе!\n\n"
+        f"Ты получил <b>+5💪 бицепсов</b>\n"
+        f"Твой рейтинг: <b>{new_score}</b> бицепсов.\n\n"
+        f"💡 Напоминаю: каждое из еженедельных заданий можно выполнить только 1 раз в неделю!"
+    )
+
+    # Проверяем статус обоих заданий
+    status = await get_weekly_challenge_status(user_id)
+    if status["pullups_done"] and status["steps_done"]:
+        response_text += "\n\n🏆 СУПЕР! Ты выполнил оба задания на этой неделе!"
+
+    # Удаляем сообщение с просьбой отправить видео
+    await _delete_prompt_message(message. bot, message.chat.id, prompt_info)
+    weekly_prompts.pop(user_id, None)
+
+    await message.answer(response_text, parse_mode="HTML")

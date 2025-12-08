@@ -6,7 +6,7 @@ from config import DB_PATH
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         # Таблица пользователей
-        await db.execute(
+        await db. execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -32,6 +32,23 @@ async def init_db():
                 bonus_video_file_id TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, task_date),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        """
+        )
+
+        # Новая таблица для еженедельных заданий
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS weekly_tasks (
+                user_id INTEGER,
+                week_year TEXT,
+                pullups_done INTEGER DEFAULT 0,
+                steps_done INTEGER DEFAULT 0,
+                pullups_video_file_id TEXT,
+                steps_video_file_id TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, week_year),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """
@@ -95,7 +112,7 @@ async def get_or_create_user(user_id, name):
     """Получить пользователя или создать нового"""
     async with aiosqlite.connect(DB_PATH) as db:
         # Получаем описание колонок перед fetchone
-        cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        cursor = await db.execute("SELECT * FROM users WHERE user_id = ? ", (user_id,))
         columns = [desc[0] for desc in cursor.description]
         user = await cursor.fetchone()
 
@@ -104,7 +121,7 @@ async def get_or_create_user(user_id, name):
                 "INSERT INTO users (user_id, name, score, day_off_used, is_active) VALUES (?, ?, 10, 0, 1)",
                 (user_id, name),
             )
-            await db.commit()
+            await db. commit()
             return {
                 "user_id": user_id,
                 "name": name,
@@ -171,7 +188,7 @@ async def get_day_off_count(user_id):
 
 
 async def use_day_off(user_id):
-    """Использовать day off. Возвращает (success, remaining) или (False, None) если закончились"""
+    """Использовать day off.  Возвращает (success, remaining) или (False, None) если закончились"""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT day_off_used FROM users WHERE user_id = ?", (user_id,)
@@ -184,7 +201,7 @@ async def use_day_off(user_id):
                 "UPDATE users SET day_off_used = day_off_used + 1 WHERE user_id = ?",
                 (user_id,),
             )
-            await db.commit()
+            await db. commit()
             return (True, 3 - (used + 1))
         return (False, None)
 
@@ -248,7 +265,7 @@ async def is_bonus_awarded(user_id, task_date):
 async def mark_bonus_done(user_id, task_date, video_file_id=None):
     """Отметить бонусное задание как выполненное"""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+        await db. execute(
             """
             INSERT INTO daily_tasks (user_id, task_date, status, bonus_awarded, bonus_video_file_id)
             VALUES (?, ?, 'done', 1, ?)
@@ -264,7 +281,7 @@ async def mark_bonus_done(user_id, task_date, video_file_id=None):
 async def deactivate_user(user_id):
     """Деактивировать пользователя (выбыл из челленджа)"""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET is_active = 0 WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE users SET is_active = 0 WHERE user_id = ? ", (user_id,))
         await db.commit()
 
 
@@ -279,7 +296,7 @@ async def reset_monthly_day_off():
         await db.execute(
             """
             UPDATE users 
-            SET day_off_used = 0, last_reset_month = ?
+            SET day_off_used = 0, last_reset_month = ? 
             WHERE is_active = 1 AND last_reset_month != ?
         """,
             (reset_key, reset_key),
@@ -321,7 +338,7 @@ async def get_user_stats(user_id, month=None, year=None):
                        SUM(CASE WHEN status = 'dayoff' THEN 1 ELSE 0 END) as dayoff_count,
                        SUM(CASE WHEN bonus_awarded = 1 THEN 1 ELSE 0 END) as bonus_count
                 FROM daily_tasks 
-                WHERE user_id = ?
+                WHERE user_id = ? 
             """,
                 (user_id,),
             )
@@ -339,9 +356,9 @@ async def check_weekly_bonus(user_id, week_start_date):
     """Проверить, выполнил ли пользователь все задания за неделю без day off"""
     from datetime import datetime, timedelta
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite. connect(DB_PATH) as db:
         # Генерируем список всех дат недели (7 дней)
-        week_start = datetime.strptime(week_start_date, "%Y-%m-%d").date()
+        week_start = datetime.strptime(week_start_date, "%Y-%m-%d"). date()
         week_dates = [week_start + timedelta(days=i) for i in range(7)]
         week_dates_str = [d.isoformat() for d in week_dates]
 
@@ -411,34 +428,12 @@ async def award_weekly_bonus(user_id, week_start_date):
         return False
 
 
-
-    # Отправляем уведомления пользователям, если передан bot
-    if bot and chat_id and awarded_users:
-        try:
-            names_list = ", ".join(
-                [name for _, name in awarded_users[:5]]
-            )  # Первые 5 имен
-            if len(awarded_users) > 5:
-                names_list += f" и еще {len(awarded_users) - 5}"
-
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"🎉 Недельный бонус!\n\n"
-                f"Поздравляем участников, которые выполнили все задания на этой неделе без пропусков:\n"
-                f"{names_list}\n\n"
-                f"Каждый получил +5 💪 бицепсов за полную неделю! 🔥",
-            )
-        except Exception as e:
-            print(f"Ошибка при отправке уведомления о недельном бонусе: {e}")
-
-    return awarded_count
-
-
 async def reset_all_data():
     """Полностью очистить все данные (пользователи и задания)"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM daily_tasks")
-        await db.execute("DELETE FROM users")
+        await db. execute("DELETE FROM weekly_tasks")
+        await db. execute("DELETE FROM users")
         await db.commit()
         return True
 
@@ -450,6 +445,7 @@ async def reset_scores_only():
         await db.execute("UPDATE users SET score = 10, day_off_used = 0, is_active = 1")
         # Удаляем все задания
         await db.execute("DELETE FROM daily_tasks")
+        await db.execute("DELETE FROM weekly_tasks")
         await db.commit()
         return True
 
@@ -468,8 +464,8 @@ async def get_users_without_task_today():
 
     today = date.today().isoformat()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
+    async with aiosqlite. connect(DB_PATH) as db:
+        cursor = await db. execute(
             """
             SELECT u.user_id, u.name
             FROM users u
@@ -477,13 +473,13 @@ async def get_users_without_task_today():
             AND NOT EXISTS (
                 SELECT 1 FROM daily_tasks dt
                 WHERE dt.user_id = u.user_id
-                AND dt.task_date = ?
+                AND dt.task_date = ? 
                 AND dt.status = 'done'
             )
             AND NOT EXISTS (
                 SELECT 1 FROM daily_tasks dt
-                WHERE dt.user_id = u.user_id
-                AND dt.task_date = ?
+                WHERE dt.user_id = u. user_id
+                AND dt. task_date = ?
                 AND dt.status = 'dayoff'
             )
             ORDER BY u.name
@@ -495,8 +491,8 @@ async def get_users_without_task_today():
 
 async def auto_apply_dayoff_for_incomplete_tasks():
     """
-    Автоматически применяет day off для участников, которые не выполнили основное задание.
-    Вызывается в полночь (00:01).
+    Автоматически применяет day off для участников, которые не выполнили основное задание. 
+    Вызывается в полночь (00:01). 
     Если day off закончились, участник выбывает из челленджа.
     """
     from datetime import date
@@ -513,13 +509,13 @@ async def auto_apply_dayoff_for_incomplete_tasks():
             AND NOT EXISTS (
                 SELECT 1 FROM daily_tasks dt
                 WHERE dt.user_id = u.user_id
-                AND dt.task_date = ?
+                AND dt.task_date = ? 
                 AND dt.status = 'done'
             )
             AND NOT EXISTS (
                 SELECT 1 FROM daily_tasks dt
                 WHERE dt.user_id = u.user_id
-                AND dt.task_date = ?
+                AND dt.task_date = ? 
                 AND dt.status = 'dayoff'
             )
             ORDER BY u.name
@@ -533,11 +529,11 @@ async def auto_apply_dayoff_for_incomplete_tasks():
         for user_id, name, day_off_used in users_without_task:
             if day_off_used < 3:
                 # Применяем day off автоматически
-                await db.execute(
+                await db. execute(
                     "UPDATE users SET day_off_used = day_off_used + 1 WHERE user_id = ?",
                     (user_id,),
                 )
-                await db.execute(
+                await db. execute(
                     """
                     INSERT INTO daily_tasks (user_id, task_date, status)
                     VALUES (?, ?, 'dayoff')
@@ -545,7 +541,7 @@ async def auto_apply_dayoff_for_incomplete_tasks():
                 """,
                     (user_id, yesterday),
                 )
-                result["auto_dayoff_applied"].append(
+                result["auto_dayoff_applied"]. append(
                     {
                         "user_id": user_id,
                         "name": name,
@@ -562,3 +558,103 @@ async def auto_apply_dayoff_for_incomplete_tasks():
 
         await db.commit()
         return result
+
+
+# === ФУНКЦИИ ДЛЯ ЕЖЕНЕДЕЛЬНОГО ЧЕЛЛЕНДЖА ===
+
+def get_current_week_year():
+    """Получить текущую неделю в формате 'YYYY-WW'"""
+    today = datetime.now()
+    week_number = today.isocalendar()[1]
+    year = today.isocalendar()[0]
+    return f"{year}-W{week_number:02d}"
+
+
+def is_week_active():
+    """Проверить, активна ли текущая неделя (до 23:59 воскресенья)"""
+    today = datetime.now()
+    # 6 - воскресенье в Python's weekday()
+    days_until_sunday = 6 - today.weekday()
+    if days_until_sunday < 0:
+        days_until_sunday += 7
+
+    # Если сегодня воскресенье, то неделя активна до конца дня
+    if days_until_sunday == 0:
+        return True
+    return days_until_sunday >= 0
+
+
+async def get_weekly_challenge_status(user_id, week_year=None):
+    """Получить статус еженедельного челленджа пользователя"""
+    if week_year is None:
+        week_year = get_current_week_year()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT pullups_done, steps_done, pullups_video_file_id, steps_video_file_id
+            FROM weekly_tasks
+            WHERE user_id = ?  AND week_year = ?  
+        """,
+            (user_id, week_year),
+        )
+        result = await cursor.fetchone()
+        if result:
+            return {
+                "pullups_done": bool(result[0]),
+                "steps_done": bool(result[1]),
+                "pullups_video": result[2],
+                "steps_video": result[3],
+            }
+        return {
+            "pullups_done": False,
+            "steps_done": False,
+            "pullups_video": None,
+            "steps_video": None,
+        }
+
+
+async def mark_weekly_task_done(user_id, task_type, video_file_id, week_year=None):
+    """Отметить еженедельное задание как выполненное"""
+    if week_year is None:
+        week_year = get_current_week_year()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        if task_type == "pullups":
+            await db.execute(
+                """
+                INSERT INTO weekly_tasks (user_id, week_year, pullups_done, pullups_video_file_id)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(user_id, week_year) DO UPDATE SET
+                    pullups_done = 1,
+                    pullups_video_file_id = excluded. pullups_video_file_id
+            """,
+                (user_id, week_year, video_file_id),
+            )
+        elif task_type == "steps":
+            await db.execute(
+                """
+                INSERT INTO weekly_tasks (user_id, week_year, steps_done, steps_video_file_id)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(user_id, week_year) DO UPDATE SET
+                    steps_done = 1,
+                    steps_video_file_id = excluded.steps_video_file_id
+            """,
+                (user_id, week_year, video_file_id),
+            )
+        await db.commit()
+
+
+async def is_weekly_task_completed(user_id, task_type, week_year=None):
+    """Проверить, выполнено ли еженедельное задание"""
+    if week_year is None:
+        week_year = get_current_week_year()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        column = "pullups_done" if task_type == "pullups" else "steps_done"
+        cursor = await db.execute(
+            f"SELECT {column} FROM weekly_tasks WHERE user_id = ? AND week_year = ?",
+            (user_id, week_year),
+        )
+        result = await cursor.fetchone()
+        return bool(result and result[0])
