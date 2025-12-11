@@ -101,7 +101,6 @@ async def cmd_help(message: Message):
     )
 
 
-# --- Обработка видеофайлов ---
 # --- Обработка видеофайлов и фото (для основного задания и еженедельного челленджа) ---
 @router.message(F.video | F.document | F.photo)
 async def handle_all_videos(message: Message):
@@ -118,22 +117,31 @@ async def handle_all_videos(message: Message):
         return
 
     # ===== СНАЧАЛА ПРОВЕРЯЕМ ЕЖЕНЕДЕЛЬНЫЙ ЧЕЛЛЕНДЖ =====
-    weekly_prompt_info = weekly_prompts.get(user_id)
+    weekly_prompt_info = weekly_prompts. get(user_id)
     if weekly_prompt_info:
         task_type = weekly_prompt_info. get("type")
         if task_type and task_type in ["pullups", "steps"]:
+            # 🔑 ВАЖНО: Удаляем weekly_prompts СРАЗУ, чтобы не обработать это видео еще раз
+            weekly_prompts.pop(user_id, None)
+            
+            # Проверяем, не выполнено ли уже это задание НА ЭТОЙ НЕДЕЛЕ
+            if await is_weekly_task_completed(user_id, task_type):
+                task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
+                # Молча пропускаем дополнительные видео - не отправляем ошибку
+                return
+            
             # Получаем file_id видео/фото
             file_id = None
-            if message.video:
+            if message. video:
                 file_id = message.video.file_id
             elif message.photo:
                 file_id = message.photo[-1].file_id
             elif (
                 message.document
                 and message.document.mime_type
-                and "video" in message. document.mime_type
+                and "video" in message.document.mime_type
             ):
-                file_id = message. document.file_id
+                file_id = message.document.file_id
 
             if not file_id:
                 await message.answer("Пожалуйста, пришли видео или фото упражнений.")
@@ -142,15 +150,6 @@ async def handle_all_videos(message: Message):
             if not is_week_active():
                 await message.answer("❌ Неделя закончилась! Попробуй на следующей неделе.")
                 await _delete_prompt_message(message.bot, message.chat.id, weekly_prompt_info)
-                weekly_prompts. pop(user_id, None)
-                return
-
-            # Проверяем, не выполнено ли уже это задание
-            if await is_weekly_task_completed(user_id, task_type):
-                task_name = "Подтягивания" if task_type == "pullups" else "Шаги"
-                await message.answer(f"✅ {task_name} уже выполнены на этой неделе!")
-                await _delete_prompt_message(message. bot, message.chat.id, weekly_prompt_info)
-                weekly_prompts.pop(user_id, None)
                 return
 
             # Отмечаем задание как выполненное
@@ -165,8 +164,8 @@ async def handle_all_videos(message: Message):
             new_score = updated_user["score"]
 
             response_text = (
-                f"🔥 Отлично, {message. from_user.first_name}! {task_emoji}\n"
-                f"<b>{task_name}</b> выполнены на этой неделе!\n\n"
+                f"🔥 Отлично, {message. from_user.first_name}!\n"
+                f"<b>{task_emoji} {task_name}</b> выполнены на этой неделе!\n\n"
                 f"Ты получил <b>+5💪 бицепсов</b>\n"
                 f"Твой рейтинг: <b>{new_score}</b> бицепсов.\n\n"
                 f"💡 Напоминаю: каждое из еженедельных заданий можно выполнить только 1 раз в неделю!"
@@ -175,11 +174,10 @@ async def handle_all_videos(message: Message):
             # Проверяем статус обоих заданий
             status = await get_weekly_challenge_status(user_id)
             if status["pullups_done"] and status["steps_done"]:
-                response_text += "\n\n🏆 СУПЕР! Ты выполнил оба задания на этой неделе!"
+                response_text += "\n\n🏅 Бро, мой респект тебе! Ты выполнил оба задания на этой неделе!"
 
             # Удаляем сообщение с просьбой отправить видео
             await _delete_prompt_message(message.bot, message.chat.id, weekly_prompt_info)
-            weekly_prompts.pop(user_id, None)
 
             await message.answer(response_text, parse_mode="HTML")
             return  # Выходим, чтобы не обрабатывать как основное задание
