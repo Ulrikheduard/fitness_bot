@@ -54,6 +54,33 @@ async def init_db():
         """
         )
 
+        # Таблица для дуэлей
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS duels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                challenger_id INTEGER NOT NULL,
+                opponent_id INTEGER NOT NULL,
+                second_id INTEGER NOT NULL,
+                week_year TEXT NOT NULL,
+                challenge_video_file_id TEXT NOT NULL,
+                response_video_file_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                result TEXT,
+                winner_id INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL,
+                challenge_message_id INTEGER,
+                response_message_id INTEGER,
+                result_message_id INTEGER,
+                FOREIGN KEY (challenger_id) REFERENCES users(user_id),
+                FOREIGN KEY (opponent_id) REFERENCES users(user_id),
+                FOREIGN KEY (second_id) REFERENCES users(user_id),
+                FOREIGN KEY (winner_id) REFERENCES users(user_id)
+            )
+        """
+        )
+
         # Миграция: добавляем недостающие колонки к существующим таблицам
         try:
             # Проверяем наличие колонки day_off_used
@@ -72,6 +99,18 @@ async def init_db():
                 await db.execute(
                     "ALTER TABLE users ADD COLUMN last_reset_month INTEGER DEFAULT 0"
                 )
+            if "duels_won" not in columns:
+                await db.execute(
+                    "ALTER TABLE users ADD COLUMN duels_won INTEGER DEFAULT 0"
+                )
+            if "duels_lost" not in columns:
+                await db.execute(
+                    "ALTER TABLE users ADD COLUMN duels_lost INTEGER DEFAULT 0"
+                )
+            if "duels_draw" not in columns:
+                await db.execute(
+                    "ALTER TABLE users ADD COLUMN duels_draw INTEGER DEFAULT 0"
+                )
 
             # Обновляем существующие записи, устанавливая значения по умолчанию
             await db.execute(
@@ -79,8 +118,12 @@ async def init_db():
                 UPDATE users 
                 SET day_off_used = COALESCE(day_off_used, 0),
                     is_active = COALESCE(is_active, 1),
-                    last_reset_month = COALESCE(last_reset_month, 0)
-                WHERE day_off_used IS NULL OR is_active IS NULL OR last_reset_month IS NULL
+                    last_reset_month = COALESCE(last_reset_month, 0),
+                    duels_won = COALESCE(duels_won, 0),
+                    duels_lost = COALESCE(duels_lost, 0),
+                    duels_draw = COALESCE(duels_draw, 0)
+                WHERE day_off_used IS NULL OR is_active IS NULL OR last_reset_month IS NULL 
+                    OR duels_won IS NULL OR duels_lost IS NULL OR duels_draw IS NULL
             """
             )
 
@@ -658,3 +701,208 @@ async def is_weekly_task_completed(user_id, task_type, week_year=None):
         )
         result = await cursor.fetchone()
         return bool(result and result[0])
+
+
+# === ФУНКЦИИ ДЛЯ ДУЭЛЕЙ ===
+
+async def get_duels_count_this_week(user_id, week_year=None):
+    """Получить количество дуэлей, инициированных пользователем на этой неделе"""
+    if week_year is None:
+        week_year = get_current_week_year()
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM duels WHERE challenger_id = ? AND week_year = ?",
+            (user_id, week_year),
+        )
+        result = await cursor.fetchone()
+        return result[0] if result else 0
+
+
+async def get_available_opponents(user_id, week_year=None):
+    """Получить список доступных соперников для дуэли (исключая самого пользователя и тех, кто уже участвовал 2 раза)"""
+    if week_year is None:
+        week_year = get_current_week_year()
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Получаем всех активных пользователей, исключая самого пользователя
+        # и тех, кто уже участвовал в 2 дуэлях на этой неделе (как challenger или opponent)
+        cursor = await db.execute(
+            """
+            SELECT DISTINCT u.user_id, u.name
+            FROM users u
+            WHERE u.is_active = 1
+            AND u.user_id != ?
+            AND (
+                SELECT COUNT(*) FROM duels d
+                WHERE (d.challenger_id = u.user_id OR d.opponent_id = u.user_id)
+                AND d.week_year = ?
+            ) < 2
+            ORDER BY u.name
+            """,
+            (user_id, week_year),
+        )
+        return await cursor.fetchall()
+
+
+async def create_duel(challenger_id, opponent_id, second_id, challenge_video_file_id, challenge_message_id, expires_at):
+    """Создать новую дуэль"""
+    week_year = get_current_week_year()
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO duels (
+                challenger_id, opponent_id, second_id, week_year,
+                challenge_video_file_id, challenge_message_id, expires_at, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            """,
+            (challenger_id, opponent_id, second_id, week_year, challenge_video_file_id, challenge_message_id, expires_at),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_duel(duel_id):
+    """Получить информацию о дуэли по ID"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT d.*, 
+                   c.name as challenger_name, 
+                   o.name as opponent_name, 
+                   s.name as second_name
+            FROM duels d
+            JOIN users c ON d.challenger_id = c.user_id
+            JOIN users o ON d.opponent_id = o.user_id
+            JOIN users s ON d.second_id = s.user_id
+            WHERE d.id = ?
+            """,
+            (duel_id,),
+        )
+        columns = [desc[0] for desc in cursor.description]
+        result = await cursor.fetchone()
+        if not result:
+            return None
+        return dict(zip(columns, result))
+
+
+async def get_pending_duel_for_opponent(opponent_id):
+    """Получить активную дуэль, где пользователь является соперником и еще не ответил"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT d.*, 
+                   c.name as challenger_name, 
+                   o.name as opponent_name, 
+                   s.name as second_name
+            FROM duels d
+            JOIN users c ON d.challenger_id = c.user_id
+            JOIN users o ON d.opponent_id = o.user_id
+            JOIN users s ON d.second_id = s.user_id
+            WHERE d.opponent_id = ? AND d.status = 'pending' AND d.response_video_file_id IS NULL
+            ORDER BY d.created_at DESC
+            LIMIT 1
+            """,
+            (opponent_id,),
+        )
+        columns = [desc[0] for desc in cursor.description]
+        result = await cursor.fetchone()
+        if not result:
+            return None
+        return dict(zip(columns, result))
+
+
+async def update_duel_response(duel_id, response_video_file_id, response_message_id):
+    """Обновить дуэль с ответным видео от соперника"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE duels 
+            SET response_video_file_id = ?, response_message_id = ?, status = 'awaiting_result'
+            WHERE id = ?
+            """,
+            (response_video_file_id, response_message_id, duel_id),
+        )
+        await db.commit()
+
+
+async def resolve_duel(duel_id, result, winner_id=None, result_message_id=None):
+    """Завершить дуэль с результатом"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE duels 
+            SET status = 'completed', result = ?, winner_id = ?, result_message_id = ?
+            WHERE id = ?
+            """,
+            (result, winner_id, result_message_id, duel_id),
+        )
+        
+        # Обновляем статистику дуэлей для участников
+        duel = await get_duel(duel_id)
+        if duel:
+            challenger_id = duel["challenger_id"]
+            opponent_id = duel["opponent_id"]
+            
+            if result == "challenger_won":
+                await db.execute(
+                    "UPDATE users SET duels_won = duels_won + 1 WHERE user_id = ?",
+                    (challenger_id,),
+                )
+                await db.execute(
+                    "UPDATE users SET duels_lost = duels_lost + 1 WHERE user_id = ?",
+                    (opponent_id,),
+                )
+            elif result == "opponent_won":
+                await db.execute(
+                    "UPDATE users SET duels_won = duels_won + 1 WHERE user_id = ?",
+                    (opponent_id,),
+                )
+                await db.execute(
+                    "UPDATE users SET duels_lost = duels_lost + 1 WHERE user_id = ?",
+                    (challenger_id,),
+                )
+            elif result == "draw":
+                await db.execute(
+                    "UPDATE users SET duels_draw = duels_draw + 1 WHERE user_id = ?",
+                    (challenger_id,),
+                )
+                await db.execute(
+                    "UPDATE users SET duels_draw = duels_draw + 1 WHERE user_id = ?",
+                    (opponent_id,),
+                )
+        
+        await db.commit()
+
+
+async def get_expired_duels():
+    """Получить список дуэлей, у которых истекло время ожидания ответа"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT * FROM duels 
+            WHERE status = 'pending' 
+            AND response_video_file_id IS NULL
+            AND expires_at < datetime('now')
+            """,
+        )
+        columns = [desc[0] for desc in cursor.description]
+        results = await cursor.fetchall()
+        return [dict(zip(columns, row)) for row in results]
+
+
+async def get_all_active_users_except(user_ids):
+    """Получить всех активных пользователей, исключая указанных"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        placeholders = ",".join("?" * len(user_ids))
+        cursor = await db.execute(
+            f"""
+            SELECT user_id, name FROM users 
+            WHERE is_active = 1 AND user_id NOT IN ({placeholders})
+            ORDER BY name
+            """,
+            tuple(user_ids),
+        )
+        return await cursor.fetchall()

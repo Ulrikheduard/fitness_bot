@@ -3,8 +3,9 @@ from typing import Optional
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from datetime import date, datetime, timedelta
-from config import ADMIN_IDS
+from config import ADMIN_IDS, CHAT_ID
 from database import (
     get_or_create_user,
     get_user,
@@ -26,9 +27,25 @@ from database import (
     is_weekly_task_completed,
     is_week_active,
     get_current_week_year,
+    get_duels_count_this_week,
+    get_available_opponents,
+    create_duel,
+    get_duel,
+    get_pending_duel_for_opponent,
+    update_duel_response,
+    resolve_duel,
+    get_expired_duels,
+    get_all_active_users_except,
+    DB_PATH,
 )
+import aiosqlite
 from keyboards import action_keyboard
 from keyboards import weekly_challenge_keyboard
+from keyboards import (
+    opponent_selection_keyboard,
+    second_selection_keyboard,
+    duel_result_keyboard,
+)
 
 # Роутер (подключается в main.py)
 router = Router()
@@ -38,6 +55,9 @@ router = Router()
 video_prompts: dict[int, dict[str, object]] = {}
 # Глобальный словарь для отслеживания контекста еженедельного челленджа
 weekly_prompts: dict[int, dict[str, object]] = {}
+# Глобальный словарь для отслеживания состояния дуэли
+# Формат: {user_id: {"stage": "opponent"|"second"|"video", "opponent_id": int, "second_id": int, "message_id": int}}
+duel_prompts: dict[int, dict[str, object]] = {}
 
 
 async def _delete_prompt_message(
@@ -86,6 +106,7 @@ async def cmd_help(message: Message):
         "/stats — посмотреть статистику\n"
         "/task — получить кнопки для отметки задания\n"
         "/weekly — еженедельный челлендж (70 подтягиваний или 50k шагов за неделю)\n"
+        "/duel — вызвать соперника на дуэль (2 раза в неделю)\n"
         "/leaderboard — посмотреть таблицу лидеров\n\n"
         "<b>Основное задание:</b>\n"
         "Каждый день бот будет присылать напоминание с кнопками в 9:00 утра.  "
@@ -95,7 +116,14 @@ async def cmd_help(message: Message):
         "Воспользуйся командой /weekly для участия в еженедельном челленже.  "
         "Выбери одно или оба задания и пришли подтверждение выполнения.  "
         "Каждое задание доступно только 1 раз в неделю (до 23:59 в воскресенье).  "
-        "За каждое выполненное задание получи +5 баллов.",
+        "За каждое выполненное задание получи +5 баллов.\n\n"
+        "<b>Дуэль:</b>\n"
+        "Воспользуйся командой /duel для вызова соперника на дуэль.  "
+        "Ты можешь вызвать на дуэль 2 раза в неделю.  "
+        "Пришли видео с упражнением, соперник должен повторить его.  "
+        "У соперника есть 24 часа на ответ.  "
+        "Если соперник не успевает, ты получаешь +2 очка, он теряет -2.  "
+        "Если ничья (решение секунданта), оба получают +1 очко.",
         parse_mode="HTML",
         reply_markup=action_keyboard(),
     )
@@ -114,6 +142,193 @@ async def handle_all_videos(message: Message):
 
     if not user["is_active"]:
         await message.answer("Ты выбыл из челленджа. Увидимся в следующем месяце!")
+        return
+
+    # ===== СНАЧАЛА ПРОВЕРЯЕМ ДУЭЛЬ =====
+    duel_prompt_info = duel_prompts.get(user_id)
+    if duel_prompt_info and duel_prompt_info.get("stage") == "video":
+        # Это видео для создания дуэли
+        opponent_id = duel_prompt_info.get("opponent_id")
+        second_id = duel_prompt_info.get("second_id")
+
+        if not opponent_id or not second_id:
+            await message.answer("Ошибка: неверные данные дуэли")
+            duel_prompts.pop(user_id, None)
+            return
+
+        # Получаем file_id видео/фото
+        file_id = None
+        if message.video:
+            file_id = message.video.file_id
+        elif message.photo:
+            file_id = message.photo[-1].file_id
+        elif (
+            message.document
+            and message.document.mime_type
+            and "video" in message.document.mime_type
+        ):
+            file_id = message.document.file_id
+
+        if not file_id:
+            await message.answer("Пожалуйста, пришли видео или фото упражнений.")
+            return
+
+        # Вычисляем время истечения (24 часа от сейчас)
+        expires_at = (datetime.now() + timedelta(hours=24)).isoformat()
+
+        # Создаем дуэль
+        challenge_message = await message.answer(
+            "⚔️ <b>ДУЭЛЬ СОЗДАНА</b>\n\n" "Ожидаю подтверждения от соперника...",
+            parse_mode="HTML",
+        )
+
+        try:
+            duel_id = await create_duel(
+                user_id,
+                opponent_id,
+                second_id,
+                file_id,
+                challenge_message.message_id,
+                expires_at,
+            )
+
+            # Получаем информацию о пользователях
+            challenger = await get_user(user_id)
+            opponent = await get_user(opponent_id)
+            second = await get_user(second_id)
+
+            # Форматируем дату истечения
+            expires_dt = datetime.fromisoformat(expires_at)
+            expires_str = expires_dt.strftime("%d.%m.%Y в %H:%M")
+
+            # Отправляем сообщение с условиями дуэли в общий чат
+            try:
+                duel_message = await message.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=(
+                        f"⚔️ <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
+                        f"<b>{challenger['name']}</b> вызывает <b>{opponent['name']}</b> на дуэль!\n\n"
+                        f"<b>Условия:</b>\n"
+                        f"• Секундант: <b>{second['name']}</b>\n"
+                        f"• Соперник должен повторить упражнение из видео\n"
+                        f"• Сделать как минимум такое же количество повторов\n"
+                        f"• У соперника есть 24 часа до <b>{expires_str}</b>\n\n"
+                        f"{opponent['name']}, пришли видео с ответом в ответ на это сообщение!"
+                    ),
+                    parse_mode="HTML",
+                )
+
+                # Обновляем дуэль с message_id сообщения
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE duels SET challenge_message_id = ? WHERE id = ?",
+                        (duel_message.message_id, duel_id),
+                    )
+                    await db.commit()
+            except (TelegramForbiddenError, TelegramBadRequest) as e:
+                await message.answer(
+                    f"❌ Не удалось отправить вызов на дуэль в общий чат.",
+                    parse_mode="HTML",
+                )
+                print(f"Ошибка при отправке вызова на дуэль в чат: {e}")
+                duel_prompts.pop(user_id, None)
+                return
+
+            # Отправляем финальное сообщение вызывающему
+            await challenge_message.edit_text(
+                f"⚔️ <b>ДУЭЛЬ СОЗДАНА</b>\n\n"
+                f"<b>Дуэлянты:</b>\n"
+                f"• {challenger['name']} (ты)\n"
+                f"• {opponent['name']}\n\n"
+                f"<b>Секундант:</b> {second['name']}\n\n"
+                f"<b>Время до истечения:</b> {expires_str}\n\n"
+                f"Ожидаю ответного видео от соперника...",
+                parse_mode="HTML",
+            )
+
+            # Очищаем промпт
+            duel_prompts.pop(user_id, None)
+
+            # Удаляем сообщение с просьбой отправить видео, если оно есть
+            await _delete_prompt_message(message.bot, message.chat.id, duel_prompt_info)
+
+        except Exception as e:
+            await message.answer(f"Ошибка при создании дуэли: {e}")
+            duel_prompts.pop(user_id, None)
+
+        return
+
+    # Проверяем, есть ли активная дуэль, где пользователь является соперником
+    pending_duel = await get_pending_duel_for_opponent(user_id)
+    if pending_duel:
+        # Это ответное видео от соперника
+        # Получаем file_id видео/фото
+        file_id = None
+        if message.video:
+            file_id = message.video.file_id
+        elif message.photo:
+            file_id = message.photo[-1].file_id
+        elif (
+            message.document
+            and message.document.mime_type
+            and "video" in message.document.mime_type
+        ):
+            file_id = message.document.file_id
+
+        if not file_id:
+            await message.answer("Пожалуйста, пришли видео или фото упражнений.")
+            return
+
+        # Обновляем дуэль с ответным видео
+        response_message = await message.answer(
+            "✅ Видео получено! Ожидаю решения секунданта...",
+            parse_mode="HTML",
+        )
+
+        await update_duel_response(
+            pending_duel["id"], file_id, response_message.message_id
+        )
+
+        # Отправляем сообщение секунданту с кнопками для решения результата в общий чат
+        try:
+            second_message = await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
+                    f"⚔️ <b>ДУЭЛЬ ГОТОВА К РЕШЕНИЮ</b>\n\n"
+                    f"Оба дуэлянта прислали свои видео!\n\n"
+                    f"<b>Дуэлянты:</b>\n"
+                    f"• {pending_duel['challenger_name']}\n"
+                    f"• {pending_duel['opponent_name']}\n\n"
+                    f"{pending_duel['second_name']}, определи результат дуэли:"
+                ),
+                reply_markup=duel_result_keyboard(
+                    pending_duel["id"],
+                    pending_duel["challenger_name"],
+                    pending_duel["opponent_name"],
+                ),
+                parse_mode="HTML",
+            )
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            await message.answer(
+                f"⚠️ Не удалось отправить сообщение в общий чат.",
+                parse_mode="HTML",
+            )
+            print(f"Ошибка при отправке сообщения секунданту в чат: {e}")
+            return
+
+        # Уведомляем в общий чат о получении ответа
+        try:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
+                    f"⚔️ <b>Соперник прислал ответ!</b>\n\n"
+                    f"Секундант {pending_duel['second_name']} определяет результат дуэли..."
+                ),
+                parse_mode="HTML",
+            )
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            print(f"Ошибка при отправке уведомления в чат: {e}")
+
         return
 
     # ===== СНАЧАЛА ПРОВЕРЯЕМ ЕЖЕНЕДЕЛЬНЫЙ ЧЕЛЛЕНДЖ =====
@@ -761,3 +976,279 @@ async def weekly_challenge_select(callback: CallbackQuery):
         "message_id": prompt_message.message_id,
     }
     await callback.answer()
+
+
+# === ОБРАБОТЧИКИ ДУЭЛЕЙ ===
+
+
+@router.message(Command("duel"))
+async def cmd_duel(message: Message):
+    """Команда для начала дуэли"""
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+
+    if not user:
+        await message.answer("Сначала используй команду /start")
+        return
+
+    if not user["is_active"]:
+        await message.answer("Ты выбыл из челленджа. Увидимся в следующем месяце!")
+        return
+
+    if not is_week_active():
+        await message.answer(
+            "❌ Неделя закончилась! Дуэли доступны только до 23:59 в воскресенье."
+        )
+        return
+
+    # Проверяем количество дуэлей на этой неделе
+    duels_count = await get_duels_count_this_week(user_id)
+    if duels_count >= 2:
+        await message.answer(
+            "❌ Ты уже использовал все 2 дуэли на этой неделе! Попробуй на следующей неделе."
+        )
+        return
+
+    # Получаем список доступных соперников
+    opponents = await get_available_opponents(user_id)
+    if not opponents:
+        await message.answer(
+            "❌ Нет доступных соперников для дуэли. Все участники уже использовали свои 2 дуэли на этой неделе."
+        )
+        return
+
+    # Используем всех доступных соперников (сообщения будут отправляться в общий чат)
+    available_opponents = opponents
+
+    # Удаляем предыдущий промпт дуэли, если был
+    previous_prompt = duel_prompts.pop(user_id, None)
+    if previous_prompt:
+        await _delete_prompt_message(message.bot, message.chat.id, previous_prompt)
+
+    # Отправляем сообщение с условиями и меню выбора соперника
+    prompt_message = await message.answer(
+        "⚔️ <b>ДУЭЛЬ</b>\n\n"
+        "<b>Условия:</b>\n"
+        "• Участник может вызвать на дуэль другого участника всего 2 раза за неделю\n"
+        "• Вызывающий на дуэль должен прислать видео с упражнением, которое нужно повторить\n"
+        "• Соперник должен сделать как минимум такое же количество повторов\n"
+        "• У соперника есть 24 часа на выполнение задания\n"
+        "• Если соперник не выполняет задание, победитель получает +2💪 бицепса, проигравший -2💪 бицепса\n"
+        "• Если ничья, оба получают +1💪 бицепс (решение за секундантом)\n\n"
+        "Выбери соперника:",
+        reply_markup=opponent_selection_keyboard(available_opponents),
+        parse_mode="HTML",
+    )
+
+    # Сохраняем состояние дуэли
+    duel_prompts[user_id] = {
+        "stage": "opponent",
+        "message_id": prompt_message.message_id,
+    }
+
+
+@router.callback_query(F.data.startswith("duel_opponent_"))
+async def duel_select_opponent(callback: CallbackQuery):
+    """Обработка выбора соперника в дуэли"""
+    user_id = callback.from_user.id
+    opponent_id = int(callback.data.split("_")[-1])
+
+    user = await get_user(user_id)
+    if not user or not user["is_active"]:
+        await callback.answer(
+            "Ошибка: пользователь не найден или неактивен", show_alert=True
+        )
+        return
+
+    if not is_week_active():
+        await callback.answer("❌ Неделя закончилась!", show_alert=True)
+        return
+
+    # Проверяем, что это правильный этап
+    prompt_info = duel_prompts.get(user_id)
+    if not prompt_info or prompt_info.get("stage") != "opponent":
+        await callback.answer("Ошибка: неверный этап дуэли", show_alert=True)
+        return
+
+    # Получаем список доступных секундантов (все активные пользователи кроме дуэлянтов)
+    seconds = await get_all_active_users_except([user_id, opponent_id])
+    if not seconds:
+        await callback.answer("Нет доступных секундантов", show_alert=True)
+        return
+
+    # Обновляем состояние
+    duel_prompts[user_id] = {
+        "stage": "second",
+        "opponent_id": opponent_id,
+        "message_id": prompt_info.get("message_id"),
+    }
+
+    # Обновляем сообщение с меню выбора секунданта
+    try:
+        await callback.message.edit_text(
+            "⚔️ <b>ДУЭЛЬ</b>\n\n"
+            "<b>Условия:</b>\n"
+            "• Участник может вызвать на дуэль другого участника всего 2 раза за неделю\n"
+            "• Пришли видео с упражнением, которое нужно повторить\n"
+            "• Соперник должен сделать как минимум такое же количество повторов\n"
+            "• У соперника есть 24 часа на выполнение задания\n"
+            "• Если соперник не выполняет задание, победитель получает +2💪 бицепса, проигравший -2💪 бицепса\n"
+            "• Если ничья, оба получают +1💪 бицепс (решение за секундантом)\n\n"
+            "Выбери секунданта:",
+            reply_markup=second_selection_keyboard(seconds),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("duel_second_"))
+async def duel_select_second(callback: CallbackQuery):
+    """Обработка выбора секунданта в дуэли"""
+    user_id = callback.from_user.id
+    second_id = int(callback.data.split("_")[-1])
+
+    user = await get_user(user_id)
+    if not user or not user["is_active"]:
+        await callback.answer(
+            "Ошибка: пользователь не найден или неактивен", show_alert=True
+        )
+        return
+
+    if not is_week_active():
+        await callback.answer("❌ Неделя закончилась!", show_alert=True)
+        return
+
+    # Проверяем, что это правильный этап
+    prompt_info = duel_prompts.get(user_id)
+    if (
+        not prompt_info
+        or prompt_info.get("stage") != "second"
+        or "opponent_id" not in prompt_info
+    ):
+        await callback.answer("Ошибка: неверный этап дуэли", show_alert=True)
+        return
+
+    opponent_id = prompt_info["opponent_id"]
+
+    # Обновляем состояние
+    duel_prompts[user_id] = {
+        "stage": "video",
+        "opponent_id": opponent_id,
+        "second_id": second_id,
+        "message_id": prompt_info.get("message_id"),
+    }
+
+    # Просим прислать видео
+    try:
+        await callback.message.edit_text(
+            "⚔️ <b>ДУЭЛЬ</b>\n\n"
+            "Отлично! Теперь пришли видео с упражнением, которое должен повторить твой соперник.\n"
+            "Соперник должен сделать как минимум такое же количество повторов.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("duel_result_"))
+async def duel_resolve_result(callback: CallbackQuery):
+    """Обработка решения результата дуэли (только для секунданта)"""
+    user_id = callback.from_user.id
+    parts = callback.data.split("_")
+    duel_id = int(parts[2])
+    result_type = parts[3]
+
+    # Получаем информацию о дуэли
+    duel = await get_duel(duel_id)
+    if not duel:
+        await callback.answer("Дуэль не найдена", show_alert=True)
+        return
+
+    # Проверяем, что это секундант
+    if duel["second_id"] != user_id:
+        await callback.answer(
+            "Только секундант может определить результат дуэли!", show_alert=True
+        )
+        return
+
+    # Проверяем, что дуэль ожидает результата
+    if duel["status"] != "awaiting_result":
+        await callback.answer(
+            "Дуэль уже завершена или еще не готова к решению", show_alert=True
+        )
+        return
+
+    # Определяем результат и победителя
+    if result_type == "challenger":
+        result = "challenger_won"
+        winner_id = duel["challenger_id"]
+        await update_score(duel["challenger_id"], 2)
+        await update_score(duel["opponent_id"], -2)
+    elif result_type == "opponent":
+        result = "opponent_won"
+        winner_id = duel["opponent_id"]
+        await update_score(duel["challenger_id"], -2)
+        await update_score(duel["opponent_id"], 2)
+    elif result_type == "draw":
+        result = "draw"
+        winner_id = None
+        await update_score(duel["challenger_id"], 1)
+        await update_score(duel["opponent_id"], 1)
+    elif result_type == "cancelled":
+        result = "cancelled"
+        winner_id = None
+    else:
+        await callback.answer("Неверный тип результата", show_alert=True)
+        return
+
+    # Завершаем дуэль
+    result_message = await callback.message.edit_text(
+        f"⚔️ <b>ДУЭЛЬ ЗАВЕРШЕНА</b>\n\n"
+        f"Результат: {result_type}\n"
+        f"Секундант: {duel['second_name']}\n\n"
+        f"Дуэлянты:\n"
+        f"• {duel['challenger_name']}\n"
+        f"• {duel['opponent_name']}",
+        parse_mode="HTML",
+    )
+
+    await resolve_duel(duel_id, result, winner_id, result_message.message_id)
+
+    # Уведомляем участников дуэли в общий чат
+    try:
+        challenger = await get_user(duel["challenger_id"])
+        opponent = await get_user(duel["opponent_id"])
+
+        if result == "challenger_won":
+            result_text = (
+                f"🏆 <b>{duel['challenger_name']}</b> победил! Получено 2💪\n"
+                f"💔 <b>{duel['opponent_name']}</b> проиграл. Потеряно 2💪"
+            )
+        elif result == "opponent_won":
+            result_text = (
+                f"🏆 <b>{duel['opponent_name']}</b> победил! Получено 2💪\n"
+                f"💔 <b>{duel['challenger_name']}</b> проиграл. Потеряно 2💪"
+            )
+        elif result == "draw":
+            result_text = (
+                f"🤝 Ничья! Оба дуэлянта получили +1💪\n"
+                f"• <b>{duel['challenger_name']}</b>: +1💪\n"
+                f"• <b>{duel['opponent_name']}</b>: +1💪"
+            )
+        else:
+            result_text = f"❌ Дуэль не состоялась"
+
+        await callback.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"⚔️ <b>РЕЗУЛЬТАТ ДУЭЛИ</b>\n\n{result_text}",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"Ошибка при отправке уведомлений о дуэли: {e}")
+
+    await callback.answer("Результат дуэли сохранен!")

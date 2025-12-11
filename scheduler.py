@@ -5,6 +5,11 @@ from keyboards import action_keyboard
 from database import (
     reset_monthly_day_off,
     get_users_without_task_today,
+    get_expired_duels,
+    resolve_duel,
+    get_duel,
+    get_user,
+    update_score,
 )
 
 # Пример набора цитат
@@ -48,6 +53,7 @@ QUOTES = [
     "Встань. Сделай. Упади. Встань снова. Это твоя новая суперспособность.",
     "Маленький шаг сегодня — огромный «ну хоть что-то» завтра.",
 ]
+
 
 async def daily_reminder(bot, chat_id):
     last_reset_month = 0
@@ -221,3 +227,53 @@ async def nightly_check(bot, chat_id):
                 last_check_date = current_date
             except Exception as e:
                 print(f"Ошибка при выполнении ночной проверки: {e}")
+
+
+async def check_expired_duels(bot, chat_id):
+    """Проверяет истечение времени дуэлей каждые 5 минут"""
+    while True:
+        try:
+            expired_duels = await get_expired_duels()
+
+            for duel in expired_duels:
+                # Автоматически завершаем дуэль в пользу вызывающего
+                await resolve_duel(
+                    duel["id"], "challenger_won", duel["challenger_id"], None
+                )
+
+                # Начисляем баллы
+                await update_score(duel["challenger_id"], 2)
+                await update_score(duel["opponent_id"], -2)
+
+                # Получаем информацию о пользователях
+                challenger = await get_user(duel["challenger_id"])
+                opponent = await get_user(duel["opponent_id"])
+
+                # Уведомляем участников в общий чат
+                try:
+                    from config import CHAT_ID
+
+                    challenger_name = challenger.get("name", "Неизвестно")
+                    opponent_name = opponent.get("name", "Неизвестно")
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=(
+                            f"⚔️ <b>ДУЭЛЬ ЗАВЕРШЕНА</b>\n\n"
+                            f"Соперник не успел прислать ответ в течение 24 часов.\n\n"
+                            f"🏆 <b>{challenger_name}</b> победил! Получено +2💪\n"
+                            f"💔 <b>{opponent_name}</b> проиграл. Потеряно -2💪"
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    print(f"Ошибка при отправке уведомлений о дуэли: {e}")
+
+                print(
+                    f"✅ Дуэль {duel['id']} автоматически завершена в пользу {challenger['name']}"
+                )
+
+            # Проверяем каждые 5 минут
+            await asyncio.sleep(300)
+        except Exception as e:
+            print(f"Ошибка при проверке истечения дуэлей: {e}")
+            await asyncio.sleep(300)
