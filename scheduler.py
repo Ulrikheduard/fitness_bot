@@ -49,7 +49,6 @@ QUOTES = [
     "Маленький шаг сегодня — огромный «ну хоть что-то» завтра.",
 ]
 
-
 async def daily_reminder(bot, chat_id):
     last_reset_month = 0
     last_sent_date = None
