@@ -36,6 +36,9 @@ from database import (
     resolve_duel,
     get_expired_duels,
     get_all_active_users_except,
+    get_user_ranking_position,
+    get_max_extra_streak,
+    get_weekly_tasks_count,
     DB_PATH,
 )
 import aiosqlite
@@ -45,6 +48,18 @@ from keyboards import (
     opponent_selection_keyboard,
     second_selection_keyboard,
     duel_result_keyboard,
+)
+from achievements import (
+    award_achievement,
+    check_early_bird_achievement,
+    check_double_strike_achievement,
+    check_extra_human_achievement,
+    check_full_set_achievement,
+    check_final_boss_achievement,
+    get_user_level,
+    get_user_achievements,
+    LEVEL_NAMES,
+    ACHIEVEMENTS,
 )
 
 # Роутер (подключается в main.py)
@@ -176,19 +191,14 @@ async def handle_all_videos(message: Message):
         # Вычисляем время истечения (24 часа от сейчас)
         expires_at = (datetime.now() + timedelta(hours=24)).isoformat()
 
-        # Создаем дуэль
-        challenge_message = await message.answer(
-            "⚔️ <b>ДУЭЛЬ СОЗДАНА</b>\n\n" "Ожидаю подтверждения от соперника...",
-            parse_mode="HTML",
-        )
-
         try:
+            # Создаем дуэль (message_id будет обновлен после отправки сообщения в чат)
             duel_id = await create_duel(
                 user_id,
                 opponent_id,
                 second_id,
                 file_id,
-                challenge_message.message_id,
+                None,  # message_id будет обновлен после отправки сообщения в чат
                 expires_at,
             )
 
@@ -208,11 +218,11 @@ async def handle_all_videos(message: Message):
                     text=(
                         f"⚔️ <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
                         f"<b>{challenger['name']}</b> вызывает <b>{opponent['name']}</b> на дуэль!\n\n"
+                        f"<b>Секундант:</b> {second['name']}\n\n"
                         f"<b>Условия:</b>\n"
-                        f"• Секундант: <b>{second['name']}</b>\n"
                         f"• Соперник должен повторить упражнение из видео\n"
                         f"• Сделать как минимум такое же количество повторов\n"
-                        f"• У соперника есть 24 часа до <b>{expires_str}</b>\n\n"
+                        f"• У соперника есть 24 часа для ответа, до <b>{expires_str}</b>\n\n"
                         f"{opponent['name']}, пришли видео с ответом в ответ на это сообщение!"
                     ),
                     parse_mode="HTML",
@@ -233,18 +243,6 @@ async def handle_all_videos(message: Message):
                 print(f"Ошибка при отправке вызова на дуэль в чат: {e}")
                 duel_prompts.pop(user_id, None)
                 return
-
-            # Отправляем финальное сообщение вызывающему
-            await challenge_message.edit_text(
-                f"⚔️ <b>ДУЭЛЬ СОЗДАНА</b>\n\n"
-                f"<b>Дуэлянты:</b>\n"
-                f"• {challenger['name']} (ты)\n"
-                f"• {opponent['name']}\n\n"
-                f"<b>Секундант:</b> {second['name']}\n\n"
-                f"<b>Время до истечения:</b> {expires_str}\n\n"
-                f"Ожидаю ответного видео от соперника...",
-                parse_mode="HTML",
-            )
 
             # Очищаем промпт
             duel_prompts.pop(user_id, None)
@@ -421,6 +419,15 @@ async def handle_all_videos(message: Message):
             if status["pullups_done"] and status["steps_done"]:
                 response_text += "\n\n🏅 Бро, я горжусь тобой! Ты выполнил оба задания на этой неделе!"
 
+                # Проверяем "Полный комплект" - 7 дней подряд + 2 еженедельных
+                achievement = await check_full_set_achievement(user_id)
+                if achievement:
+                    await message.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                        parse_mode="HTML",
+                    )
+
             # Удаляем сообщение с просьбой отправить видео
             await _delete_prompt_message(
                 message.bot, message.chat.id, weekly_prompt_info
@@ -514,6 +521,65 @@ async def handle_all_videos(message: Message):
             f"Видео получено и задание подтверждено.  Лови +2💪 бицепса.\n"
             f"Твой рейтинг: {{score}} бицепсов."
         )
+
+        # Проверяем ачивки для основного задания
+        current_time = datetime.now()
+
+        # Проверяем "Первый пот" - первое выполнение основного задания
+        achievement = await award_achievement(user_id, "first_sweat")
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
+
+        # Проверяем "Последний герой" - выполнил в 23:59
+        if current_time.hour == 23 and current_time.minute == 59:
+            achievement = await award_achievement(user_id, "last_hero")
+            if achievement:
+                await message.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                    parse_mode="HTML",
+                )
+
+        # Проверяем "Особое приглашение" - выполнил после 22:00
+        if current_time.hour >= 22:
+            achievement = await award_achievement(user_id, "special_invitation")
+            if achievement:
+                await message.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                    parse_mode="HTML",
+                )
+
+        # Проверяем "Ранняя пташка" - до 9 утра 3 дня подряд
+        achievement = await check_early_bird_achievement(user_id)
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
+
+        # Проверяем "Двойной удар" - основное + экстра 3 дня подряд
+        achievement = await check_double_strike_achievement(user_id)
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
+
+        # Проверяем "Финальный босс" - 25 дней подряд
+        achievement = await check_final_boss_achievement(user_id)
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
     else:  # bonus
         await mark_bonus_done(user_id, today, video_file_id)
         await update_score(user_id, 1)
@@ -521,6 +587,43 @@ async def handle_all_videos(message: Message):
             f"🔥 {message.from_user.first_name}, ты легенда!  Экстра бонус засчитан!  Лови +1💪 бицепс.\n"
             f"Твой рейтинг: {{score}} бицепсов."
         )
+
+        # Проверяем ачивки для экстра задания
+        # Проверяем "Экстра-человек" - 7 дней подряд
+        achievement = await check_extra_human_achievement(user_id)
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
+
+        # Проверяем "Двойной удар" - основное + экстра 3 дня подряд
+        achievement = await check_double_strike_achievement(user_id)
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
+
+        # Проверяем "Полный комплект" - 7 дней подряд + 2 еженедельных
+        achievement = await check_full_set_achievement(user_id)
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
+
+        # Проверяем "Финальный босс" - 25 дней подряд
+        achievement = await check_final_boss_achievement(user_id)
+        if achievement:
+            await message.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏆 <b>{message.from_user.first_name}</b> получил ачивку: <b>«{achievement['name']}»</b>!",
+                parse_mode="HTML",
+            )
 
     await _delete_prompt_message(message.bot, message.chat.id, prompt_info)
     video_prompts.pop(user_id, None)
@@ -648,19 +751,45 @@ async def show_rating(message: Message):
         await message.answer("Ты ещё не участвовал в челлендже. Используй /start")
         return
 
+    # Получаем все необходимые данные
     stats = await get_user_stats(user_id)
-    status_text = "✅ Активен" if user["is_active"] else "❌ Выбыл"
+    level = await get_user_level(user_id)
+    level_name = LEVEL_NAMES.get(level, f"Уровень {level}")
+    ranking_position = await get_user_ranking_position(user_id)
+    max_extra_streak = await get_max_extra_streak(user_id)
+    weekly_tasks_count = await get_weekly_tasks_count(user_id)
+    achievements = await get_user_achievements(user_id)
+    achievements_count = len(achievements)
+    total_achievements = len(ACHIEVEMENTS)
 
-    await message.answer(
-        f"🏆 Твой рейтинг: {user['score']} бицепсов\n"
-        f"💤 Использовано Day Off: {user['day_off_used']} из 3\n"
-        f"📊 Статистика:\n"
-        f"   Выполнено заданий: {stats['done']}\n"
-        f"   Экстра бонусы: {stats['bonus']}\n"
-        f"   Использовано Day Off: {stats['dayoff']}\n"
-        f"   Всего дней: {stats['total']}\n"
-        f"Статус: {status_text}"
+    # Получаем статистику дуэлей
+    duels_won = user.get("duels_won", 0)
+    duels_lost = user.get("duels_lost", 0)
+    duels_draw = user.get("duels_draw", 0)
+    total_duels = duels_won + duels_lost + duels_draw
+
+    # Формируем список ачивок
+    achievements_list = (
+        "\n".join([f"{name}" for name, code in achievements])
+        if achievements
+        else "Пока нет ачивок"
     )
+
+    rating_text = (
+        f"🙎‍♂️{user['name']}\n\n"
+        f"Level: {level} / {level_name}\n"
+        f"Текущий счет: {user['score']} 💪\n"
+        f"Место в рейтинге: {ranking_position}\n\n"
+        f"☑️ Основные: {stats['done']}\n"
+        f"⚡️ Экстра: {stats['bonus']}\n"
+        f"📅 Еженедельные: {weekly_tasks_count}\n\n"
+        f"🔥 Max экстра серия: {max_extra_streak} подряд\n\n"
+        f"⚔️ Дуэли: {total_duels} / {duels_won}-{duels_lost}-{duels_draw} (В-П-Н)\n\n"
+        f"🎖Ачивки ({achievements_count} из {total_achievements})\n"
+        f"{achievements_list}"
+    )
+
+    await message.answer(rating_text)
 
 
 # --- Команда /stats ---
@@ -1185,22 +1314,22 @@ async def duel_resolve_result(callback: CallbackQuery):
 
     # Определяем результат и победителя
     if result_type == "challenger":
-        result = "challenger_won"
+        result = f"Победил {challenger}"
         winner_id = duel["challenger_id"]
         await update_score(duel["challenger_id"], 2)
         await update_score(duel["opponent_id"], -2)
     elif result_type == "opponent":
-        result = "opponent_won"
+        result = f"Победил {opponent}"
         winner_id = duel["opponent_id"]
         await update_score(duel["challenger_id"], -2)
         await update_score(duel["opponent_id"], 2)
     elif result_type == "draw":
-        result = "draw"
+        result = "Ничья"
         winner_id = None
         await update_score(duel["challenger_id"], 1)
         await update_score(duel["opponent_id"], 1)
     elif result_type == "cancelled":
-        result = "cancelled"
+        result = "Отменена"
         winner_id = None
     else:
         await callback.answer("Неверный тип результата", show_alert=True)
@@ -1209,7 +1338,7 @@ async def duel_resolve_result(callback: CallbackQuery):
     # Завершаем дуэль
     result_message = await callback.message.edit_text(
         f"⚔️ <b>ДУЭЛЬ ЗАВЕРШЕНА</b>\n\n"
-        f"Результат: {result_type}\n"
+        f"Результат: {result in result_type}\n"
         f"Секундант: {duel['second_name']}\n\n"
         f"Дуэлянты:\n"
         f"• {duel['challenger_name']}\n"

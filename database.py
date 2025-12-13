@@ -6,7 +6,7 @@ from config import DB_PATH
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         # Таблица пользователей
-        await db. execute(
+        await db.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -81,6 +81,32 @@ async def init_db():
         """
         )
 
+        # Таблица для ачивок
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS achievements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT
+            )
+        """
+        )
+
+        # Таблица для связи пользователей и ачивок
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_achievements (
+                user_id INTEGER NOT NULL,
+                achievement_id INTEGER NOT NULL,
+                earned_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, achievement_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (achievement_id) REFERENCES achievements(id)
+            )
+        """
+        )
+
         # Миграция: добавляем недостающие колонки к существующим таблицам
         try:
             # Проверяем наличие колонки day_off_used
@@ -111,6 +137,8 @@ async def init_db():
                 await db.execute(
                     "ALTER TABLE users ADD COLUMN duels_draw INTEGER DEFAULT 0"
                 )
+            if "level" not in columns:
+                await db.execute("ALTER TABLE users ADD COLUMN level INTEGER DEFAULT 1")
 
             # Обновляем существующие записи, устанавливая значения по умолчанию
             await db.execute(
@@ -121,9 +149,11 @@ async def init_db():
                     last_reset_month = COALESCE(last_reset_month, 0),
                     duels_won = COALESCE(duels_won, 0),
                     duels_lost = COALESCE(duels_lost, 0),
-                    duels_draw = COALESCE(duels_draw, 0)
+                    duels_draw = COALESCE(duels_draw, 0),
+                    level = COALESCE(level, 1)
                 WHERE day_off_used IS NULL OR is_active IS NULL OR last_reset_month IS NULL 
                     OR duels_won IS NULL OR duels_lost IS NULL OR duels_draw IS NULL
+                    OR level IS NULL
             """
             )
 
@@ -150,6 +180,11 @@ async def init_db():
 
         await db.commit()
 
+        # Инициализируем ачивки
+        from achievements import init_achievements
+
+        await init_achievements()
+
 
 async def get_or_create_user(user_id, name):
     """Получить пользователя или создать нового"""
@@ -164,7 +199,7 @@ async def get_or_create_user(user_id, name):
                 "INSERT INTO users (user_id, name, score, day_off_used, is_active) VALUES (?, ?, 10, 0, 1)",
                 (user_id, name),
             )
-            await db. commit()
+            await db.commit()
             return {
                 "user_id": user_id,
                 "name": name,
@@ -244,7 +279,7 @@ async def use_day_off(user_id):
                 "UPDATE users SET day_off_used = day_off_used + 1 WHERE user_id = ?",
                 (user_id,),
             )
-            await db. commit()
+            await db.commit()
             return (True, 3 - (used + 1))
         return (False, None)
 
@@ -308,7 +343,7 @@ async def is_bonus_awarded(user_id, task_date):
 async def mark_bonus_done(user_id, task_date, video_file_id=None):
     """Отметить бонусное задание как выполненное"""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db. execute(
+        await db.execute(
             """
             INSERT INTO daily_tasks (user_id, task_date, status, bonus_awarded, bonus_video_file_id)
             VALUES (?, ?, 'done', 1, ?)
@@ -324,7 +359,9 @@ async def mark_bonus_done(user_id, task_date, video_file_id=None):
 async def deactivate_user(user_id):
     """Деактивировать пользователя (выбыл из челленджа)"""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET is_active = 0 WHERE user_id = ? ", (user_id,))
+        await db.execute(
+            "UPDATE users SET is_active = 0 WHERE user_id = ? ", (user_id,)
+        )
         await db.commit()
 
 
@@ -399,9 +436,9 @@ async def check_weekly_bonus(user_id, week_start_date):
     """Проверить, выполнил ли пользователь все задания за неделю без day off"""
     from datetime import datetime, timedelta
 
-    async with aiosqlite. connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         # Генерируем список всех дат недели (7 дней)
-        week_start = datetime.strptime(week_start_date, "%Y-%m-%d"). date()
+        week_start = datetime.strptime(week_start_date, "%Y-%m-%d").date()
         week_dates = [week_start + timedelta(days=i) for i in range(7)]
         week_dates_str = [d.isoformat() for d in week_dates]
 
@@ -475,8 +512,8 @@ async def reset_all_data():
     """Полностью очистить все данные (пользователи и задания)"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM daily_tasks")
-        await db. execute("DELETE FROM weekly_tasks")
-        await db. execute("DELETE FROM users")
+        await db.execute("DELETE FROM weekly_tasks")
+        await db.execute("DELETE FROM users")
         await db.commit()
         return True
 
@@ -507,8 +544,8 @@ async def get_users_without_task_today():
 
     today = date.today().isoformat()
 
-    async with aiosqlite. connect(DB_PATH) as db:
-        cursor = await db. execute(
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
             """
             SELECT u.user_id, u.name
             FROM users u
@@ -534,8 +571,8 @@ async def get_users_without_task_today():
 
 async def auto_apply_dayoff_for_incomplete_tasks():
     """
-    Автоматически применяет day off для участников, которые не выполнили основное задание. 
-    Вызывается в полночь (00:01). 
+    Автоматически применяет day off для участников, которые не выполнили основное задание.
+    Вызывается в полночь (00:01).
     Если day off закончились, участник выбывает из челленджа.
     """
     from datetime import date
@@ -572,11 +609,11 @@ async def auto_apply_dayoff_for_incomplete_tasks():
         for user_id, name, day_off_used in users_without_task:
             if day_off_used < 3:
                 # Применяем day off автоматически
-                await db. execute(
+                await db.execute(
                     "UPDATE users SET day_off_used = day_off_used + 1 WHERE user_id = ?",
                     (user_id,),
                 )
-                await db. execute(
+                await db.execute(
                     """
                     INSERT INTO daily_tasks (user_id, task_date, status)
                     VALUES (?, ?, 'dayoff')
@@ -584,7 +621,7 @@ async def auto_apply_dayoff_for_incomplete_tasks():
                 """,
                     (user_id, yesterday),
                 )
-                result["auto_dayoff_applied"]. append(
+                result["auto_dayoff_applied"].append(
                     {
                         "user_id": user_id,
                         "name": name,
@@ -604,6 +641,7 @@ async def auto_apply_dayoff_for_incomplete_tasks():
 
 
 # === ФУНКЦИИ ДЛЯ ЕЖЕНЕДЕЛЬНОГО ЧЕЛЛЕНДЖА ===
+
 
 def get_current_week_year():
     """Получить текущую неделю в формате 'YYYY-WW'"""
@@ -705,11 +743,12 @@ async def is_weekly_task_completed(user_id, task_type, week_year=None):
 
 # === ФУНКЦИИ ДЛЯ ДУЭЛЕЙ ===
 
+
 async def get_duels_count_this_week(user_id, week_year=None):
     """Получить количество дуэлей, инициированных пользователем на этой неделе"""
     if week_year is None:
         week_year = get_current_week_year()
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT COUNT(*) FROM duels WHERE challenger_id = ? AND week_year = ?",
@@ -723,7 +762,7 @@ async def get_available_opponents(user_id, week_year=None):
     """Получить список доступных соперников для дуэли (исключая самого пользователя и тех, кто уже участвовал 2 раза)"""
     if week_year is None:
         week_year = get_current_week_year()
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         # Получаем всех активных пользователей, исключая самого пользователя
         # и тех, кто уже участвовал в 2 дуэлях на этой неделе (как challenger или opponent)
@@ -745,10 +784,17 @@ async def get_available_opponents(user_id, week_year=None):
         return await cursor.fetchall()
 
 
-async def create_duel(challenger_id, opponent_id, second_id, challenge_video_file_id, challenge_message_id, expires_at):
+async def create_duel(
+    challenger_id,
+    opponent_id,
+    second_id,
+    challenge_video_file_id,
+    challenge_message_id,
+    expires_at,
+):
     """Создать новую дуэль"""
     week_year = get_current_week_year()
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             """
@@ -758,7 +804,15 @@ async def create_duel(challenger_id, opponent_id, second_id, challenge_video_fil
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
             """,
-            (challenger_id, opponent_id, second_id, week_year, challenge_video_file_id, challenge_message_id, expires_at),
+            (
+                challenger_id,
+                opponent_id,
+                second_id,
+                week_year,
+                challenge_video_file_id,
+                challenge_message_id,
+                expires_at,
+            ),
         )
         await db.commit()
         return cursor.lastrowid
@@ -839,13 +893,13 @@ async def resolve_duel(duel_id, result, winner_id=None, result_message_id=None):
             """,
             (result, winner_id, result_message_id, duel_id),
         )
-        
+
         # Обновляем статистику дуэлей для участников
         duel = await get_duel(duel_id)
         if duel:
             challenger_id = duel["challenger_id"]
             opponent_id = duel["opponent_id"]
-            
+
             if result == "challenger_won":
                 await db.execute(
                     "UPDATE users SET duels_won = duels_won + 1 WHERE user_id = ?",
@@ -873,7 +927,7 @@ async def resolve_duel(duel_id, result, winner_id=None, result_message_id=None):
                     "UPDATE users SET duels_draw = duels_draw + 1 WHERE user_id = ?",
                     (opponent_id,),
                 )
-        
+
         await db.commit()
 
 
@@ -906,3 +960,80 @@ async def get_all_active_users_except(user_ids):
             tuple(user_ids),
         )
         return await cursor.fetchall()
+
+
+async def get_user_ranking_position(user_id):
+    """Получить место пользователя в рейтинге"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*) + 1
+            FROM users
+            WHERE score > (SELECT score FROM users WHERE user_id = ?)
+            """,
+            (user_id,),
+        )
+        result = await cursor.fetchone()
+        return result[0] if result else 1
+
+
+async def get_max_extra_streak(user_id):
+    """Получить максимальную серию экстра заданий подряд"""
+    from datetime import date, timedelta
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT task_date, bonus_awarded
+            FROM daily_tasks
+            WHERE user_id = ?
+            ORDER BY task_date ASC
+            """,
+            (user_id,),
+        )
+        tasks = await cursor.fetchall()
+
+        # Создаем словарь для быстрого поиска
+        tasks_dict = {task_date: bonus_awarded for task_date, bonus_awarded in tasks}
+
+        if not tasks_dict:
+            return 0
+
+        # Находим минимальную и максимальную даты
+        dates = sorted([date.fromisoformat(d) for d in tasks_dict.keys()])
+        if not dates:
+            return 0
+
+        min_date = dates[0]
+        max_date = dates[-1]
+
+        max_streak = 0
+        current_streak = 0
+
+        # Проверяем последовательные дни
+        current_date = min_date
+        while current_date <= max_date:
+            date_str = current_date.isoformat()
+            if date_str in tasks_dict and tasks_dict[date_str] == 1:
+                current_streak += 1
+                max_streak = max(max_streak, current_streak)
+            else:
+                current_streak = 0
+            current_date += timedelta(days=1)
+
+        return max_streak
+
+
+async def get_weekly_tasks_count(user_id):
+    """Получить общее количество выполненных еженедельных заданий"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT SUM(pullups_done) + SUM(steps_done)
+            FROM weekly_tasks
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        result = await cursor.fetchone()
+        return result[0] if result and result[0] else 0
